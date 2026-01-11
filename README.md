@@ -534,18 +534,3 @@ Contributions are welcome. See `CONTRIBUTING.md`.
 ## Changelog
 
 See `CHANGELOG.md`.
-
----
-
-## Customization ideas
-
-- **Fixed category set:**
-  - Adjust the system prompt in `analyze.py` so the model must choose from a predefined list of categories.
-  - Optionally, post-process categories and map them to specific directory names (`Work`, `Personal`, `Ideas`, etc.).
-
-- **Markdown layout:**
-  - Tweak `_build_markdown` and `organize_note` in `organize.py` to change note header or structure.
-
-- **Audio formats:**
-  - Edit `processing.supported_formats` in `config.yaml` to add or remove formats.
-
