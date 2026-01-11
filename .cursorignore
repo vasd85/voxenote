@@ -1,0 +1,23 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+
+.pytest_cache/
+.uv_cache/
+.uv-cache/
+__pycache__/
+
+# Local config (may contain personal paths)
+config.yaml
+
+.voxnote/
+
+.venv/
+
+archive/
+input/
+output/
+temp/
+docs/archive/
+
+*.rnnn
+
+uv.lock

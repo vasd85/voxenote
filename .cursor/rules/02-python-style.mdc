@@ -1,0 +1,33 @@
+---
+description: "Python style: types, formatting, errors, I/O and comments"
+globs: **/*.py
+alwaysApply: false
+---
+
+# Python style
+
+## Formatting and tools
+
+- Use `ruff format` and `ruff check` (config in `pyproject.toml`). Do not add alternative formatters/linters without reason.
+- Write type hints for public interfaces; prefer explicit return types for public functions/methods (helpers may omit when obvious).
+- Group imports: stdlib → third-party → local (with empty line between groups).
+
+## Paths and I/O
+
+- Work with paths via `pathlib.Path`. At boundaries (CLI/config) normalize via `expanduser().resolve()`.
+- Do not write files outside `input/`, `output/`, `archive/`, `.voxnote/`, except explicit temporary directories in tests.
+
+## Errors and logging
+
+- For external tool errors (`ffmpeg`, `mlx_whisper`, Ollama) preserve context: what was run and what returned (stderr), but not "noise" in normal mode.
+- In CLI do not show traceback to user by default; keep it for debug mode.
+- Follow `00-overview.mdc` privacy rule: do not log/print full transcription/note text by default (gate behind explicit debug).
+
+## Comments
+
+- Code comments — **in English**, only for non-obvious.
+- Do not add comments like "what changed/when/why it was different before".
+- Write TODO concisely and structurally:
+  - `# TODO: Action: <description>`
+  - `# TODO: To fix: <description>`
+

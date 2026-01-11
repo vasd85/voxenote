@@ -1,0 +1,32 @@
+---
+description: "CLI & UX: command behavior, output text, errors and data safety"
+globs: src/voxnote/cli.py
+alwaysApply: false
+---
+
+# CLI & UX
+
+- **Output language**: English. Brief and to the point, without "noisy" logs.
+- **Help**: Each command must have useful `--help` and clear option descriptions.
+- **Errors**: Message = reason + what to do next (example command/flag). Do not show traceback to user.
+- **Data safety**: Do not delete/overwrite without explicit `--force`. Do not touch originals except explicit archiving step.
+- **Privacy**: Do not print full transcription/note text by default. Show file paths and short summaries (counts/lengths/hashes) unless explicit debug is enabled.
+
+## Command behavior
+
+- `process`:
+  - Skip already processed files by SHA256;
+  - On analysis error (LLM) — save transcription to `.voxnote/failed_transcriptions.jsonl`, output clear instructions on how to retry via `--file`.
+- `collect`:
+  - Clearly show "preparing/skipping" (without spam);
+  - Handle `PermissionError` on macOS correctly and suggest where to enable access.
+- `vad-trim`:
+  - `--dry-run` does not create/modify files;
+  - `--force` ignores cache;
+  - Final summary: processed/skipped/errors.
+- `init`:
+  - Do not overwrite existing `config.yaml` without `--force`.
+- `status`:
+  - Pending — only files of supported formats;
+  - Notes — all `*.md` inside `output/`.
+

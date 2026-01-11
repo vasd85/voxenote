@@ -1,0 +1,15 @@
+---
+description: "Project context and key constraints (local-only, privacy, directories, processing flow)"
+globs: "**/*"
+alwaysApply: true
+---
+
+# Project overview
+
+- **Goal**: Local CLI for audio notes: (optional) VAD trim → transcription (`mlx-whisper`) → analysis (Ollama) → Markdown note + audio archiving. **No cloud LLMs**.
+- **Platform**: macOS (Apple Silicon), Python **3.11+**. Dependencies in `pyproject.toml`, dev tools: `ruff`, `pytest` (via `uv`).
+- **Config**: `config.yaml` in repository root. Relative paths normalized to absolute in `src/voxnote/config.py`. Directories created automatically.
+- **Data directories**: `input/`, `output/`, `archive/`, local state `.voxnote/` (`.jsonl` indexes, trimmed cache, torch cache). **Do not commit** contents of `.voxnote/`.
+- **Privacy**: By default, **do not log or print** full transcription/note text. Detailed logs only in explicit debug mode.
+- **Conventions**: Code comments — **in English** and only when necessary; do not document "change history" in comments; TODO format: `# TODO: Action: ...`; commit messages — **in English**.
+

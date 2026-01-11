@@ -1,0 +1,19 @@
+---
+description: "Testing: pytest, I/O isolation, mocking external dependencies, determinism"
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Testing
+
+- **Framework**: `pytest`.
+- **Unit tests**: Do not require Ollama/ffmpeg/torch/mlx-whisper — mock/bypass external calls.
+- **I/O isolation**: Use `tmp_path` for `input/`, `output/`, `archive/`, `.voxnote/`. Do not write to real `config.yaml` — create temporary config and pass explicit path to `load_config(...)`.
+- **Fixtures**:
+  - Audio — minimal (short WAV), generate synthetically when possible;
+  - Time — tests must be deterministic: avoid real `datetime.now()`. If needed, freeze/monkeypatch "now" to a fixed UTC datetime or assert relative behavior (not exact timestamps).
+- **Regressions**:
+  - Skip "already processed" by SHA256;
+  - Reuse failed transcriptions;
+  - Determinism of trimmed cache paths and filenames in `archive/`.
+

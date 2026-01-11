@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# pytest cache
+.pytest_cache/
+
+# Project-specific
+.voxnote/
+input/
+output/
+archive/
+temp/
+docs/
+
+# uv cache (local project cache)
+.uv_cache/
+.uv-cache/
+
+# Config (may contain personal paths)
+config.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

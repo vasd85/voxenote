@@ -1,0 +1,37 @@
+---
+description: "Architecture and module boundaries: where logic should live, how idempotency/caching works"
+globs: src/voxnote/**/*.py
+alwaysApply: false
+---
+# Architecture
+
+- **Principle**: `cli.py` is a thin I/O layer; logic in modules; side effects (files/network/external CLIs) at boundaries so they can be mocked in tests.
+- **Privacy**: Treat transcription/note text as sensitive. In non-debug mode do not log/print full text (see `00-overview.mdc`). Prefer logging lengths, hashes, and file paths.
+
+## Module boundaries (responsibility)
+
+- `config.py`: Load/validate `config.yaml`, normalize paths, create directories. No business logic.
+- `models.py`: Pydantic models for configuration and domain. No side effects.
+- `state.py`: Read/write `.voxnote/*.jsonl` indexes, compute SHA256, find prepared/source matches.
+- `transcribe.py`: Wrapper over `mlx_whisper` (external CLI), extension validation, clear errors with context.
+- `analyze.py`: Ollama client (`/api/chat`, `/api/tokenize`), token limits/truncation, retries. Log details only in explicit debug mode (e.g., `llm.debug: true`).
+- `organize.py`: Slugify, Markdown generation, move audio to `archive/`, filename format `<uuid>_<original>`. Do not change directory structure/note format without good reason.
+- `vad_trim.py`: Silero VAD + ffmpeg trim, cache `.voxnote/trimmed/` by hash. `dry_run` does not write files.
+- `audio_prepare.py`: WAV preparation for VAD (ffmpeg pipeline).
+- `audio_metadata.py`: Metadata collection (mdls/ffprobe/stat) and compact output.
+- `workflow.py`: Orchestration layer, coordinates all processing steps, idempotency, event-driven API for UI.
+
+## Idempotency and cache
+
+- **Processed**: Skip already processed files by SHA256 (`.voxnote/processed_audio.jsonl`).
+- **Failed reuse**: If transcription was saved on analysis error, reuse text from `.voxnote/failed_transcriptions.jsonl`.
+- **Trim cache**: Trimmed cache path must be deterministic (hash + name) and safe for repeated runs.
+- **Collect**: Do not copy/prepare file if source_hash is already known (collected/processed).
+
+## Configuration changes
+
+- When adding keys to `config.yaml`, synchronize:
+  - `models.py` (Pydantic models),
+  - default template in `cli.py:init`,
+  - documentation/README if user-facing.
+

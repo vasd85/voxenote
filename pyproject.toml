@@ -1,0 +1,54 @@
+[project]
+name = "voxnote"
+version = "0.1.0"
+description = "CLI tool for local audio transcription and note organization using mlx-whisper and Ollama."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Dmitry Vasilenko"},
+]
+requires-python = ">=3.11"
+dependencies = [
+  "click>=8.1.7",
+  "mlx-whisper",
+  "pydantic>=2.9.0",
+  "pyyaml>=6.0.2",
+  "requests>=2.32.3",
+  "rich>=14.2.0",
+  "torch>=2.0.0",
+  "torchaudio>=2.0.0",
+  "torchcodec>=0.2.0",
+]
+
+[project.scripts]
+voxnote = "voxnote.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voxnote"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.4",
+  "pytest-mock>=3.14.0",
+  "responses>=0.25.0",
+  "ruff>=0.7.0",
+  "freezegun>=1.5.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".voxnote", ".venv", "archive", "input", "output", "temp"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
