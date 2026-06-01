@@ -175,6 +175,8 @@ The typical processing flow consists of several optional steps:
 
 Steps 2-3 create cached intermediate files (`.voxnote/prepared/` and `.voxnote/trimmed/`) that are reused on subsequent runs. The `process` command automatically uses the best available cache (trimmed > prepared > original).
 
+Instead of running each step by hand, you can run the whole flow in one command with `voxnote run`. It reads the `pipeline:` section of `config.yaml` to decide which steps to execute (see [Configuration](#configuration-configyaml)). The individual commands stay available for when you want to run a single step.
+
 ---
 
 ## Configuration (`config.yaml`)
@@ -194,6 +196,13 @@ paths:
   input: ./input
   output: ./output
   archive: ./archive
+
+pipeline:
+  # Steps that `voxnote run` executes, in order. Set any to false to skip it.
+  collect: true       # copy audio from `sources` into input/
+  prepare_vad: true   # build prepared WAV cache (mono 16kHz + denoise)
+  vad_trim: true      # remove silence via Silero VAD (optional)
+  process: true       # transcribe, analyze, and write notes
 
 transcription:
   model: mlx-community/whisper-large-v3-turbo
@@ -277,6 +286,36 @@ uv run voxnote --help
 ```
 
 Commands are described below in the order they are typically used in a workflow.
+
+### Quick start: run the whole pipeline
+
+If you don't want to run each step by hand, run the entire flow with a single command:
+
+```bash
+uv run voxnote run
+```
+
+`run` executes the steps enabled under `pipeline:` in `config.yaml`, in order:
+`collect → prepare-vad → vad-trim → process`. Disabled steps are skipped, and steps
+never abort one another — `process` always falls back to the best available source
+(trimmed > prepared > original), so a skipped or failed preprocessing step still
+produces notes. The run is idempotent: cached and already-processed files are reused.
+
+```yaml
+pipeline:
+  collect: true       # set false if you drop files into input/ yourself
+  prepare_vad: true
+  vad_trim: true       # set false to skip silence removal
+  process: true
+```
+
+To rebuild caches and reprocess everything from scratch:
+
+```bash
+uv run voxnote run --force
+```
+
+The individual step commands below remain available for running a single step.
 
 ### 1. Initialize config
 
@@ -469,6 +508,10 @@ Checks presence of `ffmpeg`, `ffprobe`, `mlx-whisper`, reachability of Ollama, a
    ```bash
    uv run voxnote init
    ```
+
+   With config in place, steps 4-7 can be replaced by a single `uv run voxnote run`
+   (it runs the steps enabled under `pipeline:`). The granular steps below are for
+   running one step at a time.
 
 4. Use `collect` to copy audio notes into `input/`:
 

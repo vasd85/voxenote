@@ -64,12 +64,22 @@ class CollectConfig(BaseModel):
     )
 
 
+class PipelineConfig(BaseModel):
+    """Steps that `voxnote run` executes, in order. Disabled steps are skipped."""
+
+    collect: bool = Field(default=True, description="Copy audio from `sources` into input/")
+    prepare_vad: bool = Field(default=True, description="Build prepared WAV cache (mono 16kHz + denoise)")
+    vad_trim: bool = Field(default=True, description="Remove silence via Silero VAD (trimmed cache)")
+    process: bool = Field(default=True, description="Transcribe, analyze, and write notes")
+
+
 class PromptsConfig(BaseModel):
     system_prompt: str = Field(..., description="System prompt for the LLM analysis")
 
 
 class AppConfig(BaseModel):
     paths: PathsConfig
+    pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     transcription: TranscriptionConfig
     llm: LLMConfig
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig)

@@ -3,6 +3,14 @@ paths:
   output: ./output
   archive: ./archive
 
+pipeline:
+  # Steps that `voxnote run` executes, in order. Set any to false to skip it.
+  # `run` is idempotent: cached and already-processed files are reused on re-runs.
+  collect: true       # copy audio from `sources` into input/ (set false if you drop files in input/ manually)
+  prepare_vad: true   # build prepared WAV cache (mono 16kHz + denoise) — recommended
+  vad_trim: true      # remove silence via Silero VAD — optional, recommended for long recordings
+  process: true       # transcribe, analyze, and write notes
+
 transcription:
   model: mlx-community/whisper-large-v3-turbo
   language: auto
