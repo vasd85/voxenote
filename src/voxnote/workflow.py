@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Callable, Generator, Iterator, List, Optional
 
 from .audio_prepare import prepare_wav_for_vad
 from .cache_paths import build_prepared_cache_path, find_prepared_cache_path
@@ -44,6 +45,62 @@ class WorkflowEvent:
     message: str
     file: Optional[Path] = None
     data: Optional[dict] = None
+
+
+def _permission_denied_message(source_dir: Path) -> str:
+    """Build a human-friendly message for a denied source directory."""
+    source_str = str(source_dir)
+    base = f"Permission denied reading source: {source_str}."
+    # macOS TCC: ~/Library/Group Containers/... (Voice Memos etc.)
+    # and other protected locations require explicit user consent.
+    protected_hint = any(
+        marker in source_str
+        for marker in (
+            "/Library/Group Containers/",
+            "/Library/Mobile Documents/",
+            "/Library/Containers/",
+            "/Library/Application Support/",
+        )
+    )
+    if protected_hint:
+        base += (
+            " This folder is protected by macOS. Grant Full Disk Access to the "
+            "terminal you run voxnote from: System Settings > Privacy & Security "
+            "> Full Disk Access. Then fully quit and reopen the terminal."
+        )
+    else:
+        base += (
+            " On macOS, grant the terminal Full Disk Access in "
+            "System Settings > Privacy & Security > Full Disk Access."
+        )
+    return base
+
+
+def _iter_source_files(
+    source_dir: Path,
+    *,
+    recursive: bool,
+    onerror: Optional[Callable[[OSError], None]] = None,
+) -> Iterator[Path]:
+    """Yield file paths under source_dir, reporting per-directory read errors.
+
+    Unlike Path.rglob(), this surfaces PermissionError on subdirectories via
+    the onerror callback instead of silently skipping them.
+    """
+    if not recursive:
+        try:
+            with os.scandir(source_dir) as it:
+                for entry in it:
+                    yield Path(entry.path)
+        except OSError as exc:
+            if onerror is not None:
+                onerror(exc)
+        return
+
+    for dirpath, _dirnames, filenames in os.walk(source_dir, onerror=onerror):
+        base = Path(dirpath)
+        for name in filenames:
+            yield base / name
 
 
 class Workflow:
@@ -377,7 +434,31 @@ class Workflow:
                 yield WorkflowEvent("warning", f"Source does not exist: {source_dir}")
                 continue
 
-            iterator = source_dir.rglob("*") if src.recursive else source_dir.glob("*")
+            # Probe top-level read access upfront: rglob() silently returns
+            # nothing on PermissionError (e.g. macOS TCC on ~/Library/...),
+            # which makes "Copied: 0, Skipped: 0" indistinguishable from an
+            # empty folder. An explicit scandir() surfaces the real cause.
+            try:
+                with os.scandir(source_dir) as probe:
+                    for _ in probe:
+                        break
+            except PermissionError:
+                yield WorkflowEvent("error", _permission_denied_message(source_dir))
+                continue
+            except OSError as exc:
+                yield WorkflowEvent("error", f"Cannot read source {source_dir}: {exc}")
+                continue
+
+            access_errors: list[tuple[str, str]] = []
+
+            def _on_walk_error(exc: OSError) -> None:
+                access_errors.append(
+                    (str(exc.filename or source_dir), exc.strerror or str(exc))
+                )
+
+            iterator = _iter_source_files(
+                source_dir, recursive=src.recursive, onerror=_on_walk_error
+            )
 
             for source_path in iterator:
                 if not source_path.is_file():
@@ -442,6 +523,17 @@ class Workflow:
                     elif "not found" in str(exc).lower() or "no such file" in str(exc).lower():
                         error_msg += f" Check that the source path exists: {source_path}"
                     yield WorkflowEvent("error", error_msg, file=source_path)
+
+            for path_str, reason in access_errors:
+                if "permission" in reason.lower() or "not permitted" in reason.lower():
+                    yield WorkflowEvent(
+                        "warning",
+                        f"Skipped {path_str}: {reason}. "
+                        "On macOS, grant Full Disk Access to your terminal "
+                        "(System Settings > Privacy & Security > Full Disk Access).",
+                    )
+                else:
+                    yield WorkflowEvent("warning", f"Skipped {path_str}: {reason}")
 
         yield WorkflowEvent(
             "summary", 
