@@ -42,6 +42,7 @@ input/
 output/
 archive/
 temp/
+temp2/
 docs/
 
 # uv cache (local project cache)

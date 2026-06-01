@@ -71,7 +71,7 @@ voxnote/
 ### 1. Clone the project
 
 ```bash
-git clone <repo-url> voxnote
+git clone https://github.com/vasd85/voxenote.git voxnote
 cd voxnote
 ```
 

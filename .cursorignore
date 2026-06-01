@@ -14,8 +14,9 @@ config.yaml
 
 archive/
 input/
-output/
+# output/
 temp/
+temp2/
 docs/archive/
 
 *.rnnn
