@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Generator, List, Optional
+from typing import Callable, Generator, Iterator, List, Optional
 
 from .audio_prepare import prepare_wav_for_vad
 from .cache_paths import build_prepared_cache_path, find_prepared_cache_path
@@ -46,6 +47,62 @@ class WorkflowEvent:
     data: Optional[dict] = None
 
 
+def _permission_denied_message(source_dir: Path) -> str:
+    """Build a human-friendly message for a denied source directory."""
+    source_str = str(source_dir)
+    base = f"Permission denied reading source: {source_str}."
+    # macOS TCC: ~/Library/Group Containers/... (Voice Memos etc.)
+    # and other protected locations require explicit user consent.
+    protected_hint = any(
+        marker in source_str
+        for marker in (
+            "/Library/Group Containers/",
+            "/Library/Mobile Documents/",
+            "/Library/Containers/",
+            "/Library/Application Support/",
+        )
+    )
+    if protected_hint:
+        base += (
+            " This folder is protected by macOS. Grant Full Disk Access to the "
+            "terminal you run voxnote from: System Settings > Privacy & Security "
+            "> Full Disk Access. Then fully quit and reopen the terminal."
+        )
+    else:
+        base += (
+            " On macOS, grant the terminal Full Disk Access in "
+            "System Settings > Privacy & Security > Full Disk Access."
+        )
+    return base
+
+
+def _iter_source_files(
+    source_dir: Path,
+    *,
+    recursive: bool,
+    onerror: Optional[Callable[[OSError], None]] = None,
+) -> Iterator[Path]:
+    """Yield file paths under source_dir, reporting per-directory read errors.
+
+    Unlike Path.rglob(), this surfaces PermissionError on subdirectories via
+    the onerror callback instead of silently skipping them.
+    """
+    if not recursive:
+        try:
+            with os.scandir(source_dir) as it:
+                for entry in it:
+                    yield Path(entry.path)
+        except OSError as exc:
+            if onerror is not None:
+                onerror(exc)
+        return
+
+    for dirpath, _dirnames, filenames in os.walk(source_dir, onerror=onerror):
+        base = Path(dirpath)
+        for name in filenames:
+            yield base / name
+
+
 class Workflow:
     def __init__(self, runtime: RuntimeContext):
         self.runtime = runtime
@@ -62,6 +119,65 @@ class Workflow:
                 f"File: {path}, Input directory: {input_root}. "
                 f"Move the file to input/ or use a relative path from input/."
             ) from exc
+
+    def run_pipeline(self, *, force: bool = False) -> Generator[WorkflowEvent, None, None]:
+        """Run the full pipeline (collect -> prepare-vad -> vad-trim -> process).
+
+        Which steps run is driven by `config.pipeline`; disabled steps are skipped.
+        Steps run in order and never abort one another: `process` falls back to the
+        best available source (trimmed > prepared > original), so a skipped or failed
+        preprocessing step still yields notes. The run is idempotent — cached and
+        already-processed files are reused on re-runs. `force` rebuilds the prepared
+        and trimmed caches and reprocesses files that were already processed.
+        """
+        pipeline = self.config.pipeline
+        step_defs: list[tuple[str, str, Callable[[], Generator[WorkflowEvent, None, None]]]] = [
+            ("collect", "Collect", lambda: self.collect_files([], "auto")),
+            ("prepare_vad", "Prepare for VAD", lambda: self.prepare_vad_files(files=None, force=force)),
+            ("vad_trim", "VAD trim", lambda: self.vad_trim_files(files=None, force=force)),
+            ("process", "Process", lambda: self.process_files(files=None, force_reprocess=force)),
+        ]
+        enabled = [step for step in step_defs if getattr(pipeline, step[0])]
+
+        if not enabled:
+            yield WorkflowEvent(
+                "info",
+                "No pipeline steps enabled. Enable at least one under `pipeline:` in config.yaml.",
+            )
+            return
+
+        yield WorkflowEvent(
+            "pipeline_plan",
+            "Pipeline plan",
+            data={"steps": [{"name": name, "label": label} for name, label, _ in enabled]},
+        )
+
+        step_summaries: list[dict] = []
+        total = len(enabled)
+        for index, (name, label, make_generator) in enumerate(enabled, start=1):
+            yield WorkflowEvent(
+                "step",
+                label,
+                data={"step": name, "label": label, "index": index, "total": total},
+            )
+            step_summary: Optional[dict] = None
+            last_info: Optional[str] = None
+            for event in make_generator():
+                if event.type == "summary":
+                    step_summary = {"step": name, "label": label, "stats": event.data or {}}
+                    yield WorkflowEvent("step_summary", f"{label} complete", data=step_summary)
+                else:
+                    if event.type == "info":
+                        last_info = event.message
+                    yield event
+            if step_summary is None:
+                # Step ran but emitted no summary (early-return on empty input). Record a
+                # row anyway so the final recap lists every step that ran; the info event
+                # was already passed through, so don't emit a redundant step_summary.
+                step_summary = {"step": name, "label": label, "stats": {}, "message": last_info or "nothing to do"}
+            step_summaries.append(step_summary)
+
+        yield WorkflowEvent("summary", "Pipeline complete", data={"steps": step_summaries})
 
     def prepare_vad_files(
         self,
@@ -377,7 +493,31 @@ class Workflow:
                 yield WorkflowEvent("warning", f"Source does not exist: {source_dir}")
                 continue
 
-            iterator = source_dir.rglob("*") if src.recursive else source_dir.glob("*")
+            # Probe top-level read access upfront: rglob() silently returns
+            # nothing on PermissionError (e.g. macOS TCC on ~/Library/...),
+            # which makes "Copied: 0, Skipped: 0" indistinguishable from an
+            # empty folder. An explicit scandir() surfaces the real cause.
+            try:
+                with os.scandir(source_dir) as probe:
+                    for _ in probe:
+                        break
+            except PermissionError:
+                yield WorkflowEvent("error", _permission_denied_message(source_dir))
+                continue
+            except OSError as exc:
+                yield WorkflowEvent("error", f"Cannot read source {source_dir}: {exc}")
+                continue
+
+            access_errors: list[tuple[str, str]] = []
+
+            def _on_walk_error(exc: OSError) -> None:
+                access_errors.append(
+                    (str(exc.filename or source_dir), exc.strerror or str(exc))
+                )
+
+            iterator = _iter_source_files(
+                source_dir, recursive=src.recursive, onerror=_on_walk_error
+            )
 
             for source_path in iterator:
                 if not source_path.is_file():
@@ -442,6 +582,17 @@ class Workflow:
                     elif "not found" in str(exc).lower() or "no such file" in str(exc).lower():
                         error_msg += f" Check that the source path exists: {source_path}"
                     yield WorkflowEvent("error", error_msg, file=source_path)
+
+            for path_str, reason in access_errors:
+                if "permission" in reason.lower() or "not permitted" in reason.lower():
+                    yield WorkflowEvent(
+                        "warning",
+                        f"Skipped {path_str}: {reason}. "
+                        "On macOS, grant Full Disk Access to your terminal "
+                        "(System Settings > Privacy & Security > Full Disk Access).",
+                    )
+                else:
+                    yield WorkflowEvent("warning", f"Skipped {path_str}: {reason}")
 
         yield WorkflowEvent(
             "summary", 

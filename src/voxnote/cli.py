@@ -52,7 +52,14 @@ def _runtime_or_exit(ctx: click.Context) -> RuntimeContext:
 class OrderedGroup(click.Group):
     def list_commands(self, ctx: click.Context) -> list[str]:
         """Return commands in the desired order."""
-        return ["init", "doctor", "collect", "prepare-vad", "vad-trim", "process", "status"]
+        return ["init", "doctor", "run", "collect", "prepare-vad", "vad-trim", "process", "status"]
+
+
+def _format_stats(stats: dict) -> str:
+    """Render a step's summary stats dict as a compact, human-readable line."""
+    if not stats:
+        return "no changes"
+    return ", ".join(f"{key.replace('_', ' ')}: {value}" for key, value in stats.items())
 
 
 @click.group(cls=OrderedGroup)
@@ -139,6 +146,76 @@ def doctor(ctx: click.Context) -> None:
     console.print(table)
     if has_failures:
         ctx.exit(1)
+
+
+@main.command()
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Rebuild prepared/trimmed caches and reprocess already-processed files across all steps.",
+)
+@click.pass_context
+def run(ctx: click.Context, force: bool) -> None:
+    """Run the full pipeline based on config (collect -> prepare-vad -> vad-trim -> process)."""
+    runtime = _runtime_or_exit(ctx)
+    workflow = Workflow(runtime)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("Starting pipeline...", total=None)
+
+        for event in workflow.run_pipeline(force=force):
+            data = event.data or {}
+            if event.type == "pipeline_plan":
+                labels = " → ".join(s["label"] for s in data.get("steps", []))
+                progress.console.print(f"[bold]Pipeline:[/bold] {labels}")
+            elif event.type == "step":
+                index, total = data.get("index"), data.get("total")
+                label = data.get("label", event.message)
+                progress.update(task_id, description=f"[bold cyan][{index}/{total}] {label}[/bold cyan]")
+                progress.console.print(f"\n[bold]▶ [{index}/{total}] {label}[/bold]")
+            elif event.type == "plan":
+                for src in data.get("plan", []):
+                    progress.console.print(f"  [dim]source: {src.source_dir} (recursive={src.recursive})[/dim]")
+            elif event.type == "info":
+                progress.console.print(f"[blue]ℹ️ {event.message}[/blue]")
+            elif event.type == "processing":
+                progress.update(task_id, description=f"[cyan]{event.message}[/cyan]")
+            elif event.type == "skipped":
+                progress.console.print(f"[dim]⏭️ {event.message}[/dim]")
+            elif event.type in ("transcribed", "analyzed"):
+                progress.console.print(f"  [green]✓ {event.message}[/green]")
+            elif event.type == "completed":
+                msg = f"  [green]✓ {event.message}[/green]"
+                if data.get("note_path"):
+                    msg += f"\n    [dim]Note: {data['note_path']}[/dim]"
+                progress.console.print(msg)
+            elif event.type == "warning":
+                progress.console.print(f"[yellow]⚠️ {event.message}[/yellow]")
+            elif event.type == "error":
+                progress.console.print(f"[red]❌ {event.message}[/red]")
+                if data.get("saved_transcription"):
+                    progress.console.print("  [dim]Transcription saved for retry.[/dim]")
+            elif event.type == "step_summary":
+                label = data.get("label", "")
+                stats = _format_stats(data.get("stats", {}))
+                progress.console.print(f"  [green]{label} complete[/green] — [dim]{stats}[/dim]")
+            elif event.type == "summary":
+                progress.update(task_id, completed=100)
+                table = Table(title="Pipeline Summary", show_header=True)
+                table.add_column("Step", style="bold")
+                table.add_column("Result")
+                for s in data.get("steps", []):
+                    result = s.get("message") or _format_stats(s.get("stats", {}))
+                    table.add_row(s["label"], result)
+                progress.console.print(table)
 
 
 @main.command()
