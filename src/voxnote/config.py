@@ -12,6 +12,9 @@ from .models import AppConfig
 # Dev fallback only: repo root, three levels up (voxnote/src/voxnote/config.py -> voxnote).
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 
+# Canonical config template shipped inside the wheel (see assets/).
+PACKAGED_TEMPLATE_PATH = Path(__file__).resolve().parent / "assets" / "config.example.yaml"
+
 # Environment variable that overrides config discovery when set.
 ENV_CONFIG_VAR = "VOXNOTE_CONFIG"
 
@@ -72,6 +75,32 @@ def resolve_state_dir(config_path: Path) -> Path:
     if config_path == user_config_path().expanduser().resolve():
         return default_state_dir()
     return local
+
+
+def init_target(explicit: Optional[Path] = None) -> Path:
+    """Resolve where `voxnote init` writes a new config.
+
+    Unlike resolve_config_path, this never falls back to CWD or repo root: with no explicit
+    path or env var, init seeds the user-level config so future runs discover it.
+    """
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+    env = os.environ.get(ENV_CONFIG_VAR)
+    if env and env.strip():
+        return Path(env).expanduser().resolve()
+    return user_config_path()
+
+
+def load_template_text() -> str:
+    """Return the config.example.yaml template text.
+
+    Prefer a repo-local template next to the dev config (so editing the repo template takes
+    effect immediately), else fall back to the packaged asset shipped in the wheel.
+    """
+    repo_local = DEFAULT_CONFIG_PATH.parent / "config.example.yaml"
+    if repo_local.exists():
+        return repo_local.read_text(encoding="utf-8")
+    return PACKAGED_TEMPLATE_PATH.read_text(encoding="utf-8")
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:

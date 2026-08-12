@@ -86,28 +86,17 @@ def main(ctx: click.Context, config_path: Optional[Path]) -> None:
 @click.pass_context
 def init(ctx: click.Context, force: bool) -> None:
     """Initialize default config.yaml and required directories."""
-    from .config import DEFAULT_CONFIG_PATH, load_config
+    from .config import init_target, load_config, load_template_text
 
     cfg_override: Optional[Path] = ctx.obj.get("config_path")
-    cfg_path = (cfg_override or DEFAULT_CONFIG_PATH).expanduser().resolve()
-    
+    cfg_path = init_target(cfg_override)
+
     if cfg_path.exists() and not force:
         console.print(f"[yellow]Config already exists at {cfg_path}. Use --force to overwrite.[/yellow]")
         return
 
-    # Check for template
-    template_path = cfg_path.parent / "config.example.yaml"
-    if not template_path.exists():
-        console.print(
-            f"[red]Template config.example.yaml not found next to {cfg_path}.[/red]\n"
-            "Add this file to the project root and retry.\n"
-            f"Expected location: {template_path}"
-        )
-        ctx.exit(1)
-
-    content = template_path.read_text(encoding="utf-8")
-
-    cfg_path.write_text(content, encoding="utf-8")
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(load_template_text(), encoding="utf-8")
 
     # Ensure directories exist
     config = load_config(cfg_path)
@@ -116,6 +105,10 @@ def init(ctx: click.Context, force: bool) -> None:
     config.archive_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(f"[green]Config written to {cfg_path}[/green]")
+    console.print(
+        "Next: edit `sources` (e.g. your Voice Memos folder), then run `voxnote doctor`. "
+        "Reading Voice Memos needs Full Disk Access for the terminal you run `voxnote collect` from."
+    )
 
 
 @main.command()
