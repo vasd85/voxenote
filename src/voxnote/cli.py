@@ -68,7 +68,7 @@ def _format_stats(stats: dict) -> str:
     "--config",
     "config_path",
     type=click.Path(dir_okay=False, path_type=Path),
-    help="Path to config.yaml (defaults to project root).",
+    help="Path to config.yaml. Default: $VOXNOTE_CONFIG, then ~/.config/voxnote/config.yaml, then ./config.yaml.",
 )
 @click.pass_context
 def main(ctx: click.Context, config_path: Optional[Path]) -> None:

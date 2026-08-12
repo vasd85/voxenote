@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import DEFAULT_CONFIG_PATH, load_config
+from .config import load_config, resolve_config_path, resolve_state_dir
 from .models import AppConfig
 
 
@@ -16,10 +16,10 @@ class RuntimeContext:
 
 
 def build_runtime(config_path: Path | None = None) -> RuntimeContext:
-    cfg_path = (config_path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    cfg_path = resolve_config_path(config_path)
     config = load_config(cfg_path)
     project_root = cfg_path.parent
-    state_dir = project_root / ".voxnote"
+    state_dir = resolve_state_dir(cfg_path)
     state_dir.mkdir(parents=True, exist_ok=True)
     return RuntimeContext(
         config_path=cfg_path,

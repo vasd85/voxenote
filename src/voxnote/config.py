@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -8,13 +9,74 @@ import yaml
 from .models import AppConfig
 
 
-# Project root is three levels up: voxnote/src/voxnote/config.py -> voxnote
+# Dev fallback only: repo root, three levels up (voxnote/src/voxnote/config.py -> voxnote).
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+
+# Environment variable that overrides config discovery when set.
+ENV_CONFIG_VAR = "VOXNOTE_CONFIG"
+
+
+def _user_config_dir() -> Path:
+    """User-level config directory (~/.config/voxnote, honoring XDG_CONFIG_HOME)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else (Path.home() / ".config")
+    return base / "voxnote"
+
+
+def user_config_path() -> Path:
+    """User-level config file path (~/.config/voxnote/config.yaml)."""
+    return _user_config_dir() / "config.yaml"
+
+
+def default_state_dir() -> Path:
+    """macOS app-support state directory used for a global install."""
+    return Path.home() / "Library" / "Application Support" / "voxnote"
+
+
+def resolve_config_path(explicit: Optional[Path] = None) -> Path:
+    """Resolve which config.yaml to use.
+
+    Priority: explicit (--config) > $VOXNOTE_CONFIG > ~/.config/voxnote/config.yaml (if it
+    exists) > ./config.yaml in CWD (if it exists) > repo-root dev fallback. Existence gates
+    only the user and CWD rungs; explicit/env/dev-fallback are returned as-is so a missing
+    explicit/env path still surfaces the FileNotFoundError in load_config.
+    """
+    if explicit is not None:
+        return explicit.expanduser().resolve()
+
+    env = os.environ.get(ENV_CONFIG_VAR)
+    if env and env.strip():
+        return Path(env).expanduser().resolve()
+
+    user = user_config_path()
+    if user.exists():
+        return user.resolve()
+
+    cwd_config = Path.cwd() / "config.yaml"
+    if cwd_config.exists():
+        return cwd_config.resolve()
+
+    return DEFAULT_CONFIG_PATH.expanduser().resolve()
+
+
+def resolve_state_dir(config_path: Path) -> Path:
+    """Resolve the .voxnote-equivalent state dir for a config path.
+
+    Keeps an existing project-local `.voxnote/` (backward compat), uses the macOS app-support
+    dir for the global user config, and otherwise places state beside the config.
+    """
+    config_path = config_path.expanduser().resolve()
+    local = config_path.parent / ".voxnote"
+    if local.exists():
+        return local
+    if config_path == user_config_path().expanduser().resolve():
+        return default_state_dir()
+    return local
 
 
 def load_config(path: Optional[Path] = None) -> AppConfig:
     """Load application configuration from YAML file."""
-    config_path = (path or DEFAULT_CONFIG_PATH).expanduser().resolve()
+    config_path = resolve_config_path(path)
     if not config_path.exists():
         raise FileNotFoundError(
             f"Config file not found at {config_path}. "
