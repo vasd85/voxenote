@@ -253,3 +253,23 @@ def test_unsupported_backend_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="Unsupported diarization backend"):
         diarize.diarize_audio(config, audio, state_dir=tmp_path / ".voxnote")
+
+
+def test_missing_engine_fails_before_models_are_downloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without sherpa-onnx installed there is nothing the ~35 MB download could be used for,
+    # so the install hint must come first — the workflow preflight is not the only caller.
+    config = _make_config(tmp_path, enabled=True)
+    audio = tmp_path / "input" / "note.wav"
+    audio.write_bytes(b"RIFF")
+
+    def missing_engine():
+        raise RuntimeError("sherpa-onnx is not available: no module named sherpa_onnx. Install it with `uv sync`")
+
+    def fail_download(*args, **kwargs):
+        raise AssertionError("models must not be fetched before the engine import is checked")
+
+    monkeypatch.setattr(diarize, "_import_sherpa_onnx", missing_engine)
+    monkeypatch.setattr(diarize, "ensure_diarization_models", fail_download)
+
+    with pytest.raises(RuntimeError, match="sherpa-onnx is not available"):
+        diarize.diarize_audio(config, audio, state_dir=tmp_path / ".voxnote")

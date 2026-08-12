@@ -394,8 +394,10 @@ def diarize_audio(
             "Set `diarization.backend: sherpa_onnx` in config.yaml."
         )
 
-    segmentation, embedding = ensure_diarization_models(config, state_dir=state_dir)
+    # Import check first: it is cheap, and its install hint is what the user must act on
+    # before a one-time ~35 MB model download is worth starting.
     sherpa_onnx = _import_sherpa_onnx()
+    segmentation, embedding = ensure_diarization_models(config, state_dir=state_dir)
     samples = _load_samples(config, audio_path)
 
     engine = _build_engine(sherpa_onnx, config, segmentation=segmentation, embedding=embedding)

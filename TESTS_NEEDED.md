@@ -190,6 +190,7 @@
 | `_extract_archive_member()` | Removing the partial fails too | Actionable `RuntimeError`, not the cleanup's own error | `target.parent` is a file | P1 | Done |
 | `_extract_archive_member()` | Archive without the expected member | Actionable `RuntimeError`, hint not duplicated | Mock `requests.get` | P1 | TODO |
 | `diarize_audio()` | Unknown backend | Raises `RuntimeError` | None | P1 | Done |
+| `diarize_audio()` | sherpa-onnx not importable | Install-hint `RuntimeError` before any model download | Mock `_import_sherpa_onnx`, `ensure_diarization_models` | P1 | Done |
 | `_read_wav_mono_16k()` | Non-16k/stereo/non-WAV input | Returns `None` so ffmpeg decode runs | None | P2 | TODO |
 | `_debug_log_diarization()` | `llm.debug: true` | Writes turn timings only, no text | None | P2 | TODO |
 
