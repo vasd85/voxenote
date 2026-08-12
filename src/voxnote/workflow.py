@@ -547,7 +547,7 @@ class Workflow:
         except Exception as exc:
             # Engine errors (e.g. raw onnxruntime text) may not mention diarization
             # at all; re-wrap so the per-file error hint always fires.
-            raise RuntimeError(f"Diarization failed: {exc}") from exc
+            raise RuntimeError(f"Diarization failed: {type(exc).__name__}: {exc}") from exc
 
         transcription = transcribe_file(
             self.config,
