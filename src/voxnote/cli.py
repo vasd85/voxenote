@@ -90,7 +90,7 @@ def init(ctx: click.Context, force: bool) -> None:
 
     cfg_override: Optional[Path] = ctx.obj.get("config_path")
     cfg_path = (cfg_override or DEFAULT_CONFIG_PATH).expanduser().resolve()
-    
+
     if cfg_path.exists() and not force:
         console.print(f"[yellow]Config already exists at {cfg_path}. Use --force to overwrite.[/yellow]")
         return
@@ -136,9 +136,7 @@ def doctor(ctx: click.Context) -> None:
         status_style = "green" if res.ok else "red"
         status_icon = "✅" if res.ok else "❌"
         table.add_row(
-            res.name,
-            f"[{status_style}]{status_icon} {'OK' if res.ok else 'FAIL'}[/{status_style}]",
-            res.info
+            res.name, f"[{status_style}]{status_icon} {'OK' if res.ok else 'FAIL'}[/{status_style}]", res.info
         )
         if not res.ok:
             has_failures = True
@@ -154,8 +152,14 @@ def doctor(ctx: click.Context) -> None:
     is_flag=True,
     help="Rebuild prepared/trimmed caches and reprocess already-processed files across all steps.",
 )
+@click.option(
+    "--diarize/--no-diarize",
+    "diarize",
+    default=None,
+    help="Force speaker diarization on or off for this run (overrides diarization.enabled).",
+)
 @click.pass_context
-def run(ctx: click.Context, force: bool) -> None:
+def run(ctx: click.Context, force: bool, diarize: Optional[bool]) -> None:
     """Run the full pipeline based on config (collect -> prepare-vad -> vad-trim -> process)."""
     runtime = _runtime_or_exit(ctx)
     workflow = Workflow(runtime)
@@ -171,7 +175,7 @@ def run(ctx: click.Context, force: bool) -> None:
     ) as progress:
         task_id = progress.add_task("Starting pipeline...", total=None)
 
-        for event in workflow.run_pipeline(force=force):
+        for event in workflow.run_pipeline(force=force, diarize=diarize):
             data = event.data or {}
             if event.type == "pipeline_plan":
                 labels = " → ".join(s["label"] for s in data.get("steps", []))
@@ -190,7 +194,7 @@ def run(ctx: click.Context, force: bool) -> None:
                 progress.update(task_id, description=f"[cyan]{event.message}[/cyan]")
             elif event.type == "skipped":
                 progress.console.print(f"[dim]⏭️ {event.message}[/dim]")
-            elif event.type in ("transcribed", "analyzed"):
+            elif event.type in ("transcribed", "diarized", "analyzed"):
                 progress.console.print(f"  [green]✓ {event.message}[/green]")
             elif event.type == "completed":
                 msg = f"  [green]✓ {event.message}[/green]"
@@ -238,9 +242,9 @@ def collect(ctx: click.Context, sources: tuple[str, ...], recursive_mode: str) -
     """Collect original audio files from sources into input directory."""
     runtime = _runtime_or_exit(ctx)
     workflow = Workflow(runtime)
-    
+
     cli_source_dirs = [Path(s).expanduser().resolve() for s in sources] if sources else []
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -250,7 +254,7 @@ def collect(ctx: click.Context, sources: tuple[str, ...], recursive_mode: str) -
         transient=True,
     ) as progress:
         task_id = progress.add_task("Collecting...", total=None)
-        
+
         for event in workflow.collect_files(cli_source_dirs, recursive_mode):
             if event.type == "info":
                 progress.console.print(f"[blue]ℹ️ {event.message}[/blue]")
@@ -258,7 +262,7 @@ def collect(ctx: click.Context, sources: tuple[str, ...], recursive_mode: str) -
                 plan = event.data["plan"] if event.data else []
                 progress.console.print("[bold]Sources plan:[/bold]")
                 for src in plan:
-                     progress.console.print(f"- {src.source_dir} (recursive={src.recursive})")
+                    progress.console.print(f"- {src.source_dir} (recursive={src.recursive})")
             elif event.type == "processing":
                 progress.update(task_id, description=f"[cyan]{event.message}[/cyan]")
             elif event.type == "skipped":
@@ -297,7 +301,9 @@ def prepare_vad(ctx: click.Context, file_relpath: Optional[str], force: bool) ->
             p.relative_to(runtime.config.input_dir.expanduser().resolve())
         except ValueError:
             console.print("[red]--file must be a path inside input/[/red]")
-            console.print(f"Example: `voxnote prepare-vad --file note.m4a` or `voxnote prepare-vad --file subdir/note.m4a`")
+            console.print(
+                f"Example: `voxnote prepare-vad --file note.m4a` or `voxnote prepare-vad --file subdir/note.m4a`"
+            )
             ctx.exit(2)
         if not p.exists() or not p.is_file():
             console.print(f"[red]File not found in input/: {file_relpath}[/red]")
@@ -393,7 +399,7 @@ def vad_trim(
     """Remove silence from audio files using Silero VAD."""
     runtime = _runtime_or_exit(ctx)
     workflow = Workflow(runtime)
-    
+
     files: Optional[list[Path]]
     if file_relpath:
         p = (runtime.config.input_dir / Path(file_relpath)).expanduser().resolve()
@@ -411,7 +417,7 @@ def vad_trim(
         files = [p]
     else:
         files = None
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -434,13 +440,13 @@ def vad_trim(
             if event.type == "info":
                 progress.console.print(f"[blue]ℹ️ {event.message}[/blue]")
             elif event.type == "processing":
-                 progress.update(task_id, description=f"[cyan]{event.message}[/cyan]")
+                progress.update(task_id, description=f"[cyan]{event.message}[/cyan]")
             elif event.type == "skipped":
-                 progress.console.print(f"[dim]{event.message}[/dim]")
+                progress.console.print(f"[dim]{event.message}[/dim]")
             elif event.type == "completed":
-                 progress.console.print(f"[green]✓ {event.message}[/green]")
+                progress.console.print(f"[green]✓ {event.message}[/green]")
             elif event.type == "error":
-                 progress.console.print(f"[red]❌ {event.message}[/red]")
+                progress.console.print(f"[red]❌ {event.message}[/red]")
             elif event.type == "summary":
                 progress.update(task_id, completed=100)
                 stats = event.data
@@ -469,17 +475,24 @@ def vad_trim(
     is_flag=True,
     help="Print audio metadata for each file (compact JSON).",
 )
+@click.option(
+    "--diarize/--no-diarize",
+    "diarize",
+    default=None,
+    help="Force speaker diarization on or off for this run (overrides diarization.enabled).",
+)
 @click.pass_context
 def process(
     ctx: click.Context,
     file_relpath: Optional[str],
     force_reprocess: bool,
     show_metadata: bool,
+    diarize: Optional[bool],
 ) -> None:
     """Process audio files from input directory or a single file."""
     runtime = _runtime_or_exit(ctx)
     workflow = Workflow(runtime)
-    
+
     files: Optional[list[Path]]
     if file_relpath:
         p = (runtime.config.input_dir / Path(file_relpath)).expanduser().resolve()
@@ -497,7 +510,7 @@ def process(
         files = [p]
     else:
         files = None
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -508,10 +521,11 @@ def process(
         transient=True,
     ) as progress:
         task_id = progress.add_task("Processing...", total=None)
-        
+
         for event in workflow.process_files(
             files=files,
-            force_reprocess=force_reprocess
+            force_reprocess=force_reprocess,
+            diarize=diarize,
         ):
             if event.type == "info":
                 progress.console.print(f"[blue]ℹ️ {event.message}[/blue]")
@@ -522,10 +536,13 @@ def process(
             elif event.type == "metadata":
                 if show_metadata and event.data:
                     from .audio_metadata import format_audio_metadata_for_console
+
                     meta_dump = format_audio_metadata_for_console(event.data["meta"])
                     progress.console.print(Panel(meta_dump, title="Audio Metadata", border_style="dim"))
             elif event.type == "transcribed":
                 progress.console.print("  [green]✓ Transcription complete[/green]")
+            elif event.type == "diarized":
+                progress.console.print(f"  [green]✓ {event.message}[/green]")
             elif event.type == "analyzed":
                 progress.console.print("  [green]✓ Analysis complete[/green]")
             elif event.type == "completed":
@@ -543,15 +560,15 @@ def process(
                 processed = event.data.get("processed", 0)
                 skipped = event.data.get("skipped", 0)
                 failed = event.data.get("failed", 0)
-                
+
                 table = Table(title="Processing Summary", show_header=True)
                 table.add_column("Status", style="bold")
                 table.add_column("Count")
-                
+
                 table.add_row("[green]Processed[/green]", str(processed))
                 table.add_row("[yellow]Skipped[/yellow]", str(skipped))
                 table.add_row("[red]Failed[/red]", str(failed))
-                
+
                 progress.console.print(table)
 
 
@@ -576,5 +593,5 @@ def status(ctx: click.Context) -> None:
     table = Table(title="Project Status", show_header=False, box=None)
     table.add_row("Pending audio files", f"[bold cyan]{pending}[/bold cyan]")
     table.add_row("Notes created", f"[bold green]{notes_count}[/bold green]")
-    
+
     console.print(Panel(table, title="Voxnote Status", expand=False))
