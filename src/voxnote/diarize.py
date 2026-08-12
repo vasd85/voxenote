@@ -18,6 +18,7 @@ import subprocess
 import tarfile
 import tempfile
 import wave
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
@@ -122,27 +123,36 @@ def _download_file(url: str, target: Path, *, timeout_s: float, what: str, manua
         raise RuntimeError(f"Failed to download the {what} from {url}: {exc}. {manual_hint}") from exc
 
 
-def _extract_archive_member(archive: Path, member_name: str, target: Path) -> None:
-    """Extract one known member by exact name (never uses archive paths as output paths)."""
-    with tarfile.open(archive, "r:bz2") as tar:
-        try:
-            member = tar.getmember(member_name)
-        except KeyError as exc:
-            raise RuntimeError(
-                f"Archive {archive.name} does not contain '{member_name}'. "
-                f"Download the model manually from {SEGMENTATION_RELEASE_PAGE} and place it at {target}."
-            ) from exc
-        if not member.isfile():
-            raise RuntimeError(f"Archive member '{member_name}' is not a regular file.")
-        extracted = tar.extractfile(member)
-        if extracted is None:
-            raise RuntimeError(f"Could not read '{member_name}' from {archive.name}.")
+def _segmentation_manual_hint(member_name: str, target: Path) -> str:
+    return f"Download it manually from {SEGMENTATION_RELEASE_PAGE}, extract '{member_name}' and place it at {target}."
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(target.name + ".part")
-        with partial.open("wb") as handle:
-            shutil.copyfileobj(extracted, handle)
-        os.replace(str(partial), str(target))
+
+def _extract_archive_member(archive: Path, member_name: str, target: Path, *, manual_hint: str) -> None:
+    """Extract one known member by exact name (never uses archive paths as output paths)."""
+    partial = target.with_name(target.name + ".part")
+    try:
+        with tarfile.open(archive, "r:bz2") as tar:
+            try:
+                member = tar.getmember(member_name)
+            except KeyError as exc:
+                raise RuntimeError(f"Archive {archive.name} does not contain '{member_name}'. {manual_hint}") from exc
+            if not member.isfile():
+                raise RuntimeError(f"Archive member '{member_name}' is not a regular file. {manual_hint}")
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                raise RuntimeError(f"Could not read '{member_name}' from {archive.name}. {manual_hint}")
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with partial.open("wb") as handle:
+                shutil.copyfileobj(extracted, handle)
+            os.replace(str(partial), str(target))
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        # A truncated/corrupt archive (e.g. a proxy served HTML with HTTP 200) must not surface
+        # as a bare bz2 error. The cleanup is best-effort: an unlink that fails in turn must not
+        # replace the actionable message with its own error.
+        with suppress(OSError):
+            partial.unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to extract '{member_name}' from {archive.name}: {exc}. {manual_hint}") from exc
 
 
 def _ensure_segmentation_model(config: AppConfig, target: Path) -> None:
@@ -153,6 +163,7 @@ def _ensure_segmentation_model(config: AppConfig, target: Path) -> None:
             "or clear `diarization.segmentation_model` in config.yaml to download the default model."
         )
 
+    manual_hint = _segmentation_manual_hint(SEGMENTATION_ARCHIVE_MEMBER, target)
     with tempfile.TemporaryDirectory() as tmpdir:
         archive = Path(tmpdir) / "sherpa-onnx-pyannote-segmentation-3-0.tar.bz2"
         _download_file(
@@ -160,12 +171,9 @@ def _ensure_segmentation_model(config: AppConfig, target: Path) -> None:
             archive,
             timeout_s=config.diarization.download_timeout_s,
             what="diarization segmentation model",
-            manual_hint=(
-                f"Download it manually from {SEGMENTATION_RELEASE_PAGE}, "
-                f"extract '{SEGMENTATION_ARCHIVE_MEMBER}' and place it at {target}."
-            ),
+            manual_hint=manual_hint,
         )
-        _extract_archive_member(archive, SEGMENTATION_ARCHIVE_MEMBER, target)
+        _extract_archive_member(archive, SEGMENTATION_ARCHIVE_MEMBER, target, manual_hint=manual_hint)
 
 
 def _ensure_embedding_model(config: AppConfig, target: Path) -> None:

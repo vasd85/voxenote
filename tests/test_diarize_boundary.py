@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from voxnote.diarize import (
     DEFAULT_EMBEDDING_FILENAME,
     DEFAULT_SEGMENTATION_RELPATH,
     DIARIZATION_DISABLED_FINGERPRINT,
+    SEGMENTATION_ARCHIVE_MEMBER,
     diarization_fingerprint,
     ensure_diarization_models,
     resolve_diarization_models,
@@ -134,6 +137,111 @@ def test_download_failure_message_points_at_the_release_page(tmp_path: Path, mon
     assert "network is unreachable" in message
     assert DEFAULT_EMBEDDING_FILENAME in message
     assert "speaker-recongition-models" in message
+
+
+class _FakeStreamedResponse:
+    """Minimal stand-in for `requests.get(..., stream=True)` used as a context manager."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> _FakeStreamedResponse:
+        return self
+
+    def __exit__(self, *exc_info) -> bool:
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_content(self, chunk_size: int = 1):
+        yield self._body
+
+
+def _segmentation_archive_bytes(tmp_path: Path, *, payload: bytes) -> bytes:
+    source = tmp_path / "source_model.onnx"
+    source.write_bytes(payload)
+    archive = tmp_path / "source.tar.bz2"
+    with tarfile.open(archive, "w:bz2") as tar:
+        tar.add(source, arcname=SEGMENTATION_ARCHIVE_MEMBER)
+    return archive.read_bytes()
+
+
+def _serve_archive(monkeypatch: pytest.MonkeyPatch, body: bytes) -> None:
+    monkeypatch.setattr(diarize.requests, "get", lambda *args, **kwargs: _FakeStreamedResponse(body))
+
+
+def test_corrupt_segmentation_archive_is_an_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A captive portal / proxy answering HTTP 200 with an HTML body passes raise_for_status,
+    # so the bz2 read is where it breaks. The user must still learn what to download where.
+    config = _make_config(tmp_path, enabled=True)
+    _serve_archive(monkeypatch, b"<html><body>Sign in to the network</body></html>")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    message = str(excinfo.value)
+    assert SEGMENTATION_ARCHIVE_MEMBER in message
+    assert "speaker-segmentation-models" in message
+    assert str(tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH) in message
+
+
+def test_truncated_segmentation_archive_is_an_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # An aborted download leaves a valid bz2 prefix, which fails with EOFError rather than a
+    # tarfile error. Incompressible payload > 900 KB so the stream really spans several blocks.
+    config = _make_config(tmp_path, enabled=True)
+    full = _segmentation_archive_bytes(tmp_path, payload=os.urandom(2 << 20))
+    _serve_archive(monkeypatch, full[: len(full) // 2])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    message = str(excinfo.value)
+    assert SEGMENTATION_ARCHIVE_MEMBER in message
+    assert "speaker-segmentation-models" in message
+
+
+def test_failed_extraction_leaves_no_partial_model_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The archive opens fine and the write breaks halfway: the half-written model must not be
+    # left in the models dir (nothing reads `*.part`, but a stale multi-MB file would linger).
+    config = _make_config(tmp_path, enabled=True)
+    _serve_archive(monkeypatch, _segmentation_archive_bytes(tmp_path, payload=b"fake-model"))
+
+    target = tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH
+    leftovers: list[list[Path]] = []
+
+    def broken_copy(*args, **kwargs):
+        leftovers.append(list(target.parent.glob("*.part")))
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(diarize.shutil, "copyfileobj", broken_copy)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    message = str(excinfo.value)
+    assert "input/output error" in message
+    assert "speaker-segmentation-models" in message
+    assert str(target) in message
+    assert leftovers == [[target.with_name(target.name + ".part")]]  # the partial did exist...
+    assert list(target.parent.glob("*.part")) == []  # ...and was cleaned up
+    assert not target.exists()
+
+
+def test_extraction_failure_survives_a_failing_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `target.parent` occupied by a regular file: mkdir fails, and unlinking the partial under
+    # that path fails too. The actionable message must not be replaced by the cleanup's error.
+    config = _make_config(tmp_path, enabled=True, segmentation_model="")
+    _serve_archive(monkeypatch, _segmentation_archive_bytes(tmp_path, payload=b"fake-model"))
+
+    target = tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH
+    target.parent.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.write_bytes(b"not a directory")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    assert "speaker-segmentation-models" in str(excinfo.value)
 
 
 def test_unsupported_backend_is_rejected(tmp_path: Path) -> None:

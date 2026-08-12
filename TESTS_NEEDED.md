@@ -184,6 +184,11 @@
 | `ensure_diarization_models()` | Custom segmentation path missing | Actionable `RuntimeError`, no download | Mock `requests.get` | P0 | Done |
 | `ensure_diarization_models()` | Custom embedding path missing | Actionable `RuntimeError`, no download | Mock `requests.get` | P0 | Done |
 | `ensure_diarization_models()` | Download fails | Error names file and release page | Mock `requests.get` | P0 | Done |
+| `_extract_archive_member()` | Corrupt (non-bz2) archive downloaded | Wrapped `RuntimeError` names member, release page and target | Mock `requests.get` | P0 | Done |
+| `_extract_archive_member()` | Truncated archive (valid bz2 prefix) | Same wrapped `RuntimeError` (the `EOFError` path) | Mock `requests.get` | P1 | Done |
+| `_extract_archive_member()` | Write fails mid-extraction | Actionable `RuntimeError`, `*.part` removed | Mock `shutil.copyfileobj` | P1 | Done |
+| `_extract_archive_member()` | Removing the partial fails too | Actionable `RuntimeError`, not the cleanup's own error | `target.parent` is a file | P1 | Done |
+| `_extract_archive_member()` | Archive without the expected member | Actionable `RuntimeError`, hint not duplicated | Mock `requests.get` | P1 | TODO |
 | `diarize_audio()` | Unknown backend | Raises `RuntimeError` | None | P1 | Done |
 | `_read_wav_mono_16k()` | Non-16k/stereo/non-WAV input | Returns `None` so ffmpeg decode runs | None | P2 | TODO |
 | `_debug_log_diarization()` | `llm.debug: true` | Writes turn timings only, no text | None | P2 | TODO |
