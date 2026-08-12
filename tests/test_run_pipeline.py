@@ -131,7 +131,7 @@ def test_run_pipeline_passes_force_and_expected_args(tmp_path: Path) -> None:
     assert by_name["collect"] == (([], "auto"), {})
     assert by_name["prepare_vad"] == ((), {"files": None, "force": True})
     assert by_name["vad_trim"] == ((), {"files": None, "force": True})
-    assert by_name["process"] == ((), {"files": None, "force_reprocess": True})
+    assert by_name["process"] == ((), {"files": None, "force_reprocess": True, "diarize": None})
 
 
 def test_run_pipeline_force_defaults_to_false(tmp_path: Path) -> None:

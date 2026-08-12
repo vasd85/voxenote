@@ -12,9 +12,19 @@ from .cache_paths import build_prepared_cache_path, find_prepared_cache_path
 from .analyze import analyze_text
 from .audio_metadata import AudioMetadata, collect_audio_metadata
 from .collect_plan import build_collect_source_plan
+from .diarize import (
+    DIARIZATION_DISABLED_FINGERPRINT,
+    diarization_fingerprint,
+    diarization_models_dir,
+    diarization_models_ready,
+    diarize_audio,
+    ensure_diarization_models,
+    probe_diarization_engine,
+)
 from .models import NoteContext, TranscriptionResult
 from .organize import organize_note
 from .runtime import RuntimeContext
+from .speaker_merge import assign_speakers, count_speakers, render_labeled_transcript
 from .state import (
     CollectedAudioEntry,
     FailedTranscriptionEntry,
@@ -26,7 +36,7 @@ from .state import (
     append_processed_entry,
     compute_file_hash,
     find_processed_entry,
-    get_failed_transcription_text,
+    get_failed_transcription,
     load_processed_hashes,
     load_collected_original_hashes,
     purge_failed_transcription,
@@ -70,8 +80,7 @@ def _permission_denied_message(source_dir: Path) -> str:
         )
     else:
         base += (
-            " On macOS, grant the terminal Full Disk Access in "
-            "System Settings > Privacy & Security > Full Disk Access."
+            " On macOS, grant the terminal Full Disk Access in System Settings > Privacy & Security > Full Disk Access."
         )
     return base
 
@@ -120,7 +129,9 @@ class Workflow:
                 f"Move the file to input/ or use a relative path from input/."
             ) from exc
 
-    def run_pipeline(self, *, force: bool = False) -> Generator[WorkflowEvent, None, None]:
+    def run_pipeline(
+        self, *, force: bool = False, diarize: Optional[bool] = None
+    ) -> Generator[WorkflowEvent, None, None]:
         """Run the full pipeline (collect -> prepare-vad -> vad-trim -> process).
 
         Which steps run is driven by `config.pipeline`; disabled steps are skipped.
@@ -129,13 +140,18 @@ class Workflow:
         preprocessing step still yields notes. The run is idempotent — cached and
         already-processed files are reused on re-runs. `force` rebuilds the prepared
         and trimmed caches and reprocesses files that were already processed.
+        `diarize` overrides `diarization.enabled` for this run.
         """
         pipeline = self.config.pipeline
         step_defs: list[tuple[str, str, Callable[[], Generator[WorkflowEvent, None, None]]]] = [
             ("collect", "Collect", lambda: self.collect_files([], "auto")),
             ("prepare_vad", "Prepare for VAD", lambda: self.prepare_vad_files(files=None, force=force)),
             ("vad_trim", "VAD trim", lambda: self.vad_trim_files(files=None, force=force)),
-            ("process", "Process", lambda: self.process_files(files=None, force_reprocess=force)),
+            (
+                "process",
+                "Process",
+                lambda: self.process_files(files=None, force_reprocess=force, diarize=diarize),
+            ),
         ]
         enabled = [step for step in step_defs if getattr(pipeline, step[0])]
 
@@ -216,7 +232,9 @@ class Workflow:
                 existing = find_prepared_cache_path(original_hash=original_hash, state_dir=self.state_dir)
                 if existing is not None and existing.exists() and not force:
                     skipped_count += 1
-                    yield WorkflowEvent("skipped", f"Skipping (already prepared): {original_path.name}", file=original_path)
+                    yield WorkflowEvent(
+                        "skipped", f"Skipping (already prepared): {original_path.name}", file=original_path
+                    )
                     continue
 
                 yield WorkflowEvent("processing", f"Preparing: {original_path.name}", file=original_path)
@@ -264,11 +282,16 @@ class Workflow:
         self,
         files: Optional[List[Path]] = None,
         force_reprocess: bool = False,
+        diarize: Optional[bool] = None,
     ) -> Generator[WorkflowEvent, None, None]:
         """
-        Process audio files: transcribe, analyze, and organize.
+        Process audio files: transcribe, optionally diarize, analyze, and organize.
+        `diarize` overrides `diarization.enabled` for this run.
         Yields WorkflowEvent updates for the UI.
         """
+        if diarize is not None:
+            self.config.diarization.enabled = diarize
+
         if files:
             target_files = files
         else:
@@ -284,8 +307,22 @@ class Workflow:
             yield WorkflowEvent("info", "No audio files to process.")
             return
 
+        current_fingerprint = diarization_fingerprint(self.config)
+
+        if self.config.diarization.enabled:
+            # Fail the whole step once instead of repeating the same error per file.
+            preflight_error = yield from self._prepare_diarization()
+            if preflight_error is not None:
+                yield WorkflowEvent("error", preflight_error)
+                yield WorkflowEvent(
+                    "summary",
+                    "Processing complete",
+                    data={"processed": 0, "skipped": 0, "failed": 0},
+                )
+                return
+
         processed_hashes = load_processed_hashes(state_dir=self.state_dir)
-        
+
         # Track stats
         processed_count = 0
         skipped_count = 0
@@ -296,7 +333,7 @@ class Workflow:
                 original_path = audio.expanduser().resolve()
                 self._assert_in_input(original_path)
                 original_hash = compute_file_hash(original_path)
-                
+
                 # Check if already processed
                 if not force_reprocess and original_hash in processed_hashes:
                     needs_reprocess = False
@@ -305,18 +342,26 @@ class Workflow:
                     if processed_entry:
                         prev_transcribed_hash = processed_entry.get("transcribed_file_hash")
 
-                    if prev_transcribed_hash:
-                        cache_path = get_trimmed_cache_path(
-                            original_hash=original_hash, state_dir=self.state_dir
+                    # Entries written before diarization existed were produced with it off.
+                    prev_fingerprint = (processed_entry or {}).get(
+                        "diarization_fingerprint"
+                    ) or DIARIZATION_DISABLED_FINGERPRINT
+                    if prev_fingerprint != current_fingerprint:
+                        needs_reprocess = True
+                        yield WorkflowEvent(
+                            "info",
+                            f"Reprocessing {audio.name} (diarization settings changed)",
+                            file=audio,
                         )
+
+                    if prev_transcribed_hash:
+                        cache_path = get_trimmed_cache_path(original_hash=original_hash, state_dir=self.state_dir)
                         if cache_path.exists():
                             current_trimmed_hash = compute_file_hash(cache_path)
                             if current_trimmed_hash != prev_transcribed_hash:
                                 needs_reprocess = True
                                 yield WorkflowEvent(
-                                    "info", 
-                                    f"Reprocessing {audio.name} (trimmed cache changed)", 
-                                    file=audio
+                                    "info", f"Reprocessing {audio.name} (trimmed cache changed)", file=audio
                                 )
 
                     if not needs_reprocess:
@@ -339,15 +384,33 @@ class Workflow:
                     )
                 yield WorkflowEvent("metadata", "Metadata loaded", file=audio, data={"meta": meta})
 
-                # Transcription
-                transcription = self._get_transcription(original_path, original_hash)
+                # Transcription (with diarization when enabled)
+                transcription = self._get_transcription(original_path, original_hash, fingerprint=current_fingerprint)
                 yield WorkflowEvent("transcribed", "Transcription complete", file=audio)
+
+                speaker_count = transcription.speaker_count
+                if speaker_count is not None:
+                    turn_count = transcription.turn_count
+                    message = f"Diarization: {speaker_count} speaker(s)"
+                    if turn_count is not None:
+                        message += f", {turn_count} turn(s)"
+                    yield WorkflowEvent(
+                        "diarized",
+                        message,
+                        file=audio,
+                        data={"speakers": speaker_count, "turns": turn_count},
+                    )
 
                 # Analysis
                 try:
-                    analysis = analyze_text(self.config, transcription.text, state_dir=self.state_dir)
+                    analysis = analyze_text(
+                        self.config,
+                        transcription.text,
+                        state_dir=self.state_dir,
+                        speaker_labeled=bool(speaker_count and speaker_count > 1),
+                    )
                     yield WorkflowEvent("analyzed", "LLM Analysis complete", file=audio)
-                    
+
                     ctx = organize_note(
                         config=self.config,
                         transcription=transcription,
@@ -356,42 +419,55 @@ class Workflow:
                         audio_metadata_dump=None,  # We can handle formatting in UI or pass object
                         source_audio_path=original_path,
                     )
-                    
+
                     # Cleanup failed entry if successful
                     purge_failed_transcription(original_path, state_dir=self.state_dir)
-                    
+
                     # Record processed state
                     self._record_processed(
-                        original_path, 
+                        original_path,
                         original_hash,
-                        transcription, 
-                        ctx, 
-                        meta, 
-                        processed_hashes
+                        transcription,
+                        ctx,
+                        meta,
+                        processed_hashes,
+                        diarization_fingerprint_value=current_fingerprint,
                     )
-                    
+
                     processed_count += 1
                     yield WorkflowEvent(
-                        "completed", 
-                        f"Created note: {ctx.paths.note_path.name}", 
-                        file=audio, 
-                        data={"note_path": ctx.paths.note_path}
+                        "completed",
+                        f"Created note: {ctx.paths.note_path.name}",
+                        file=audio,
+                        data={"note_path": ctx.paths.note_path},
                     )
 
                 except Exception as exc:
                     failed_count += 1
-                    self._handle_analysis_failure(original_path, transcription, exc)
+                    self._handle_analysis_failure(
+                        original_path,
+                        transcription,
+                        exc,
+                        diarization_fingerprint_value=current_fingerprint,
+                    )
                     yield WorkflowEvent(
-                        "error", 
-                        f"Analysis failed: {str(exc)}", 
-                        file=audio, 
-                        data={"error": str(exc), "saved_transcription": True}
+                        "error",
+                        f"Analysis failed: {str(exc)}",
+                        file=audio,
+                        data={"error": str(exc), "saved_transcription": True},
                     )
             except Exception as exc:
                 failed_count += 1
                 error_msg = f"Processing error: {str(exc)}"
                 if "mlx_whisper" in str(exc).lower():
-                    error_msg += " Check that mlx_whisper is installed: `pip install mlx-whisper` or run `voxnote doctor`."
+                    error_msg += (
+                        " Check that mlx_whisper is installed: `pip install mlx-whisper` or run `voxnote doctor`."
+                    )
+                elif "sherpa" in str(exc).lower() or "diarization" in str(exc).lower():
+                    error_msg += (
+                        " Check the diarization setup with `voxnote doctor`, "
+                        "or disable it for this run: `voxnote process --no-diarize`."
+                    )
                 elif "ollama" in str(exc).lower():
                     error_msg += " Check that Ollama is running: `ollama serve` or verify config.yaml (llm.base_url)."
                 elif "permission" in str(exc).lower():
@@ -399,26 +475,93 @@ class Workflow:
                 yield WorkflowEvent("error", error_msg, file=audio, data={"error": str(exc)})
 
         yield WorkflowEvent(
-            "summary", 
-            "Processing complete", 
-            data={"processed": processed_count, "skipped": skipped_count, "failed": failed_count}
+            "summary",
+            "Processing complete",
+            data={"processed": processed_count, "skipped": skipped_count, "failed": failed_count},
         )
 
-    def _get_transcription(self, original_path: Path, original_hash: str) -> TranscriptionResult:
-        """Helper to get transcription (fresh, cached, or failed-retry)."""
-        failed_text = get_failed_transcription_text(original_path, state_dir=self.state_dir)
-        if failed_text is not None:
-            return TranscriptionResult(audio_path=original_path, text=failed_text)
-        
+    def _prepare_diarization(self) -> Generator[WorkflowEvent, None, Optional[str]]:
+        """Check the engine and fetch the models once. Returns an error message on failure."""
+        engine_error = probe_diarization_engine()
+        if engine_error is not None:
+            return f"Diarization is enabled but the engine is not usable: {engine_error}"
+
+        try:
+            if not diarization_models_ready(self.config, state_dir=self.state_dir):
+                models_dir = diarization_models_dir(self.state_dir)
+                yield WorkflowEvent(
+                    "info",
+                    f"Fetching the missing diarization models (one-time, up to ~35 MB) into {models_dir}...",
+                )
+            ensure_diarization_models(self.config, state_dir=self.state_dir)
+        except Exception as exc:
+            return (
+                f"Diarization is enabled but its models are not ready: {exc} "
+                "Fix the models or disable diarization for this run: `voxnote process --no-diarize`."
+            )
+        return None
+
+    def _select_transcription_source(self, original_path: Path, original_hash: str) -> Path:
+        """Best available source for both transcription and diarization: trimmed > prepared > original."""
         trimmed_path = get_trimmed_cache_path(original_hash=original_hash, state_dir=self.state_dir)
         if trimmed_path.exists():
-            audio_for_transcription = trimmed_path
-        else:
-            prepared = find_prepared_cache_path(original_hash=original_hash, state_dir=self.state_dir)
-            audio_for_transcription = prepared if prepared is not None and prepared.exists() else original_path
-        return transcribe_file(self.config, audio_for_transcription, state_dir=self.state_dir)
+            return trimmed_path
+        prepared = find_prepared_cache_path(original_hash=original_hash, state_dir=self.state_dir)
+        if prepared is not None and prepared.exists():
+            return prepared
+        return original_path
 
-    def _handle_analysis_failure(self, original_path: Path, transcription: TranscriptionResult, exc: Exception) -> None:
+    def _get_transcription(self, original_path: Path, original_hash: str, *, fingerprint: str) -> TranscriptionResult:
+        """Helper to get transcription (fresh, or reused from a failed-analysis retry)."""
+        failed = get_failed_transcription(original_path, state_dir=self.state_dir)
+        if failed is not None:
+            stored_fingerprint = failed.get("diarization_fingerprint") or DIARIZATION_DISABLED_FINGERPRINT
+            text = failed.get("text")
+            # Reuse the saved text only when it was produced with the current settings,
+            # so speaker labels survive a retry and a settings change forces a re-run.
+            if isinstance(text, str) and stored_fingerprint == fingerprint:
+                stored_speakers = failed.get("speaker_count")
+                stored_turns = failed.get("turn_count")
+                return TranscriptionResult(
+                    audio_path=original_path,
+                    text=text,
+                    speaker_count=stored_speakers if isinstance(stored_speakers, int) else None,
+                    turn_count=stored_turns if isinstance(stored_turns, int) else None,
+                )
+
+        diarization_enabled = self.config.diarization.enabled
+        audio_for_transcription = self._select_transcription_source(original_path, original_hash)
+        transcription = transcribe_file(
+            self.config,
+            audio_for_transcription,
+            state_dir=self.state_dir,
+            word_timestamps=diarization_enabled,
+        )
+        if not diarization_enabled:
+            return transcription
+
+        # Same file as transcription, so both share one timeline.
+        diarization = diarize_audio(self.config, audio_for_transcription, state_dir=self.state_dir)
+        blocks = assign_speakers(transcription.segments, diarization.turns)
+        speaker_count = count_speakers(blocks)
+        # A single speaker must look exactly like a run without diarization.
+        text = render_labeled_transcript(blocks) if speaker_count > 1 else transcription.text
+        return transcription.model_copy(
+            update={
+                "text": text,
+                "speaker_count": speaker_count,
+                "turn_count": len(diarization.turns),
+            }
+        )
+
+    def _handle_analysis_failure(
+        self,
+        original_path: Path,
+        transcription: TranscriptionResult,
+        exc: Exception,
+        *,
+        diarization_fingerprint_value: str,
+    ) -> None:
         """Save transcription to failed log."""
         append_failed_transcription_entry(
             FailedTranscriptionEntry(
@@ -426,18 +569,23 @@ class Workflow:
                 audio_path=str(original_path),
                 text=transcription.text,
                 error=str(exc),
+                diarization_fingerprint=diarization_fingerprint_value,
+                speaker_count=transcription.speaker_count,
+                turn_count=transcription.turn_count,
             ),
             state_dir=self.state_dir,
         )
 
     def _record_processed(
-        self, 
-        original_path: Path, 
+        self,
+        original_path: Path,
         original_hash: str,
-        transcription: TranscriptionResult, 
+        transcription: TranscriptionResult,
         ctx: NoteContext,
         meta: AudioMetadata,
-        processed_hashes: set
+        processed_hashes: set,
+        *,
+        diarization_fingerprint_value: str,
     ) -> None:
         """Record the processed entry to state."""
         if transcription.audio_path == original_path:
@@ -457,6 +605,8 @@ class Workflow:
                 recorded_at_source=meta.recorded_at_source,
                 transcribed_file_hash=transcribed_hash,
                 transcribed_path=str(transcription.audio_path),
+                diarization_fingerprint=diarization_fingerprint_value,
+                speaker_count=transcription.speaker_count,
             ),
             state_dir=self.state_dir,
         )
@@ -511,13 +661,9 @@ class Workflow:
             access_errors: list[tuple[str, str]] = []
 
             def _on_walk_error(exc: OSError) -> None:
-                access_errors.append(
-                    (str(exc.filename or source_dir), exc.strerror or str(exc))
-                )
+                access_errors.append((str(exc.filename or source_dir), exc.strerror or str(exc)))
 
-            iterator = _iter_source_files(
-                source_dir, recursive=src.recursive, onerror=_on_walk_error
-            )
+            iterator = _iter_source_files(source_dir, recursive=src.recursive, onerror=_on_walk_error)
 
             for source_path in iterator:
                 if not source_path.is_file():
@@ -525,9 +671,7 @@ class Workflow:
                 ext = source_path.suffix.lower().lstrip(".")
                 if ext not in self.config.processing.supported_formats:
                     yield WorkflowEvent(
-                        "skipped", 
-                        f"Ignored {source_path.name} (unsupported format: {ext})", 
-                        file=source_path
+                        "skipped", f"Ignored {source_path.name} (unsupported format: {ext})", file=source_path
                     )
                     continue
 
@@ -573,7 +717,7 @@ class Workflow:
                         "error",
                         f"Permission denied: {source_path}. "
                         "On macOS, grant Full Disk Access in System Settings > Privacy & Security.",
-                        file=source_path
+                        file=source_path,
                     )
                 except Exception as exc:
                     error_msg = f"Error copying {source_path.name}: {exc}"
@@ -594,11 +738,7 @@ class Workflow:
                 else:
                     yield WorkflowEvent("warning", f"Skipped {path_str}: {reason}")
 
-        yield WorkflowEvent(
-            "summary", 
-            "Collection complete", 
-            data={"copied": copied_count, "skipped": skipped_count}
-        )
+        yield WorkflowEvent("summary", "Collection complete", data={"copied": copied_count, "skipped": skipped_count})
 
     def vad_trim_files(
         self,
@@ -645,7 +785,7 @@ class Workflow:
             try:
                 audio = audio.expanduser().resolve()
                 self._assert_in_input(audio)
-                
+
                 if not force:
                     original_hash = compute_file_hash(audio)
                     cache_path = get_trimmed_cache_path(original_hash=original_hash, state_dir=self.state_dir)
@@ -655,11 +795,9 @@ class Workflow:
                         continue
 
                 yield WorkflowEvent("processing", f"Trimming: {audio.name}", file=audio)
-                
-                success = trim_audio_file(
-                    self.config, audio, dry_run=dry_run, state_dir=self.state_dir
-                )
-                
+
+                success = trim_audio_file(self.config, audio, dry_run=dry_run, state_dir=self.state_dir)
+
                 if success:
                     processed += 1
                     msg = f"Would trim: {audio.name}" if dry_run else f"Trimmed: {audio.name}"
@@ -678,12 +816,12 @@ class Workflow:
                 yield WorkflowEvent("error", error_msg, file=audio)
 
         yield WorkflowEvent(
-            "summary", 
-            "VAD Trim complete", 
+            "summary",
+            "VAD Trim complete",
             data={
-                "processed": processed, 
-                "skipped_cached": skipped_cached, 
+                "processed": processed,
+                "skipped_cached": skipped_cached,
                 "skipped_no_speech": skipped_no_speech,
-                "errors": errors
-            }
+                "errors": errors,
+            },
         )
