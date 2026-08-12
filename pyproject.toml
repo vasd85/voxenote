@@ -11,10 +11,15 @@ requires-python = ">=3.11"
 dependencies = [
   "click>=8.1.7",
   "mlx-whisper",
+  "numpy>=1.26.0",
   "pydantic>=2.9.0",
   "pyyaml>=6.0.2",
   "requests>=2.32.3",
   "rich>=14.2.0",
+  "sherpa-onnx>=1.13.5",
+  # Ships libonnxruntime for sherpa-onnx. Declared explicitly because only the
+  # newer sherpa-onnx wheels list it, so the lock resolved without it.
+  "sherpa-onnx-core>=1.13.5",
   "torch>=2.0.0",
   "torchaudio>=2.0.0",
   "torchcodec>=0.2.0",

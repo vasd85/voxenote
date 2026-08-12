@@ -8,6 +8,7 @@ from typing import List
 
 import requests
 
+from .diarize import downloadable_diarization_models, probe_diarization_engine, resolve_diarization_models
 from .models import AppConfig
 from .runtime import RuntimeContext
 
@@ -102,6 +103,65 @@ def _check_mlx_whisper() -> CheckResult:
     return CheckResult(name="mlx_whisper", ok=False, info="Not found in PATH or venv")
 
 
+def _check_diarization_model(label: str, path: Path, *, downloadable: bool, override_key: str) -> CheckResult:
+    if not path.exists():
+        if downloadable:
+            info = (
+                f"Missing: {path}. It is downloaded on the next `voxnote process` run, "
+                "or place the file there manually."
+            )
+        else:
+            info = (
+                f"Missing: {path}. Place the file there manually, "
+                f"or clear `{override_key}` in config.yaml to download the default model."
+            )
+        return CheckResult(name=label, ok=False, info=info)
+    if not os.access(path, os.R_OK):
+        return CheckResult(name=label, ok=False, info=f"Not readable: {path}. Fix it with `chmod +r {path}`.")
+    return CheckResult(name=label, ok=True, info=str(path))
+
+
+def _check_diarization(runtime: RuntimeContext) -> List[CheckResult]:
+    config = runtime.config
+    if not config.diarization.enabled:
+        return [
+            CheckResult(
+                name="Diarization",
+                ok=True,
+                info="Disabled (set diarization.enabled: true in config.yaml to use it)",
+            )
+        ]
+
+    engine_error = probe_diarization_engine()
+    results = [
+        CheckResult(
+            name="Diarization engine",
+            ok=engine_error is None,
+            info=engine_error or "sherpa-onnx importable",
+        )
+    ]
+
+    segmentation, embedding = resolve_diarization_models(config, state_dir=runtime.state_dir)
+    segmentation_downloadable, embedding_downloadable = downloadable_diarization_models(config)
+    results.append(
+        _check_diarization_model(
+            "Diarization segmentation model",
+            segmentation,
+            downloadable=segmentation_downloadable,
+            override_key="diarization.segmentation_model",
+        )
+    )
+    results.append(
+        _check_diarization_model(
+            "Diarization embedding model",
+            embedding,
+            downloadable=embedding_downloadable,
+            override_key="diarization.embedding_model",
+        )
+    )
+    return results
+
+
 def run_doctor(runtime: RuntimeContext) -> List[CheckResult]:
     results: List[CheckResult] = []
 
@@ -111,5 +171,6 @@ def run_doctor(runtime: RuntimeContext) -> List[CheckResult]:
     results.append(_check_ollama(runtime.config.llm.base_url))
     results.append(_check_denoise_model())
     results.append(_check_source_access(runtime.config))
+    results.extend(_check_diarization(runtime))
 
     return results

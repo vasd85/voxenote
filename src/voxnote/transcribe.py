@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable, List
 
 from .config import load_config, resolve_config_path, resolve_state_dir
-from .models import AppConfig, TranscriptionResult
+from .models import AppConfig, TranscriptionResult, TranscriptSegment, TranscriptWord
 
 
 def _ensure_supported_extension(config: AppConfig, path: Path) -> None:
@@ -28,36 +28,36 @@ def _ensure_supported_extension(config: AppConfig, path: Path) -> None:
 def _remove_repetitions(text: str, max_repeats: int = 3) -> str:
     """
     Remove excessive repetitions of phrases or words from transcription.
-    
+
     Handles repeated lines (same line repeated many times consecutively).
     This is a common issue with Whisper when it encounters silence or noise.
-    
+
     Args:
         text: Input transcription text
         max_repeats: Maximum number of allowed consecutive repetitions (default: 3)
-        
+
     Returns:
         Cleaned text with excessive repetitions removed
     """
     if not text:
         return text
-    
-    lines = text.split('\n')
+
+    lines = text.split("\n")
     cleaned_lines: List[str] = []
     i = 0
-    
+
     while i < len(lines):
         line = lines[i]
         line_stripped = line.strip()
-        
+
         if not line_stripped:
             cleaned_lines.append(line)
             i += 1
             continue
-        
+
         repeat_count = 1
         j = i + 1
-        
+
         while j < len(lines):
             next_line_stripped = lines[j].strip()
             if next_line_stripped == line_stripped:
@@ -67,7 +67,7 @@ def _remove_repetitions(text: str, max_repeats: int = 3) -> str:
                 j += 1
             else:
                 break
-        
+
         if repeat_count > max_repeats:
             for _ in range(min(max_repeats, 2)):
                 cleaned_lines.append(line_stripped)
@@ -76,14 +76,96 @@ def _remove_repetitions(text: str, max_repeats: int = 3) -> str:
             for k in range(i, j):
                 cleaned_lines.append(lines[k])
             i = j
-    
-    result = '\n'.join(cleaned_lines)
+
+    result = "\n".join(cleaned_lines)
     return result.strip()
+
+
+def _drop_repeated_segments(segments: List[TranscriptSegment], max_repeats: int = 3) -> List[TranscriptSegment]:
+    """Segment-level twin of `_remove_repetitions`.
+
+    Whisper writes one line per segment, so filtering segments keeps the plain text and the
+    speaker-labeled transcript (built from the same segments) free of the same hallucinated loops.
+    """
+    kept: List[TranscriptSegment] = []
+    index = 0
+    total = len(segments)
+
+    while index < total:
+        current = segments[index].text.strip()
+        if not current:
+            kept.append(segments[index])
+            index += 1
+            continue
+
+        repeat_count = 1
+        lookahead = index + 1
+        while lookahead < total:
+            candidate = segments[lookahead].text.strip()
+            if candidate == current:
+                repeat_count += 1
+                lookahead += 1
+            elif not candidate:
+                lookahead += 1
+            else:
+                break
+
+        run = segments[index:lookahead]
+        if repeat_count > max_repeats:
+            kept.extend([segment for segment in run if segment.text.strip() == current][: min(max_repeats, 2)])
+        else:
+            kept.extend(run)
+        index = lookahead
+
+    return kept
+
+
+def _as_float(value: object, fallback: float) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return fallback
+
+
+def _parse_whisper_json(payload: dict) -> List[TranscriptSegment]:
+    """Parse mlx-whisper JSON output into segments with word timestamps."""
+    raw_segments = payload.get("segments")
+    if not isinstance(raw_segments, list):
+        return []
+
+    segments: List[TranscriptSegment] = []
+    for raw_segment in raw_segments:
+        if not isinstance(raw_segment, dict):
+            continue
+        text = str(raw_segment.get("text") or "")
+        start = _as_float(raw_segment.get("start"), 0.0)
+        end = max(_as_float(raw_segment.get("end"), start), start)
+
+        words: List[TranscriptWord] = []
+        raw_words = raw_segment.get("words")
+        if isinstance(raw_words, list):
+            # Missing/invalid word timings fall back to the previous word's end (segment
+            # start for the first word), not the segment start: a zero-length token at the
+            # segment's opening instant would be attributed to the wrong speaker turn.
+            cursor = start
+            for raw_word in raw_words:
+                if not isinstance(raw_word, dict):
+                    continue
+                word_text = str(raw_word.get("word") or "")
+                if not word_text.strip():
+                    continue
+                word_start = _as_float(raw_word.get("start"), cursor)
+                word_end = max(_as_float(raw_word.get("end"), word_start), word_start)
+                words.append(TranscriptWord(text=word_text, start=word_start, end=word_end))
+                cursor = word_end
+
+        segments.append(TranscriptSegment(text=text, start=start, end=end, words=words))
+
+    return segments
 
 
 def _find_mlx_whisper() -> str:
     """Find mlx_whisper executable in PATH or virtual environment.
-    
+
     Supports both naming variants: mlx_whisper (underscore) and mlx-whisper (dash).
     """
     mlx_whisper = shutil.which("mlx_whisper") or shutil.which("mlx-whisper")
@@ -147,19 +229,38 @@ def _debug_log_whisper(
         pass
 
 
-def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | None = None) -> str:
-    """Run mlx-whisper CLI and return plain text transcription."""
+def _find_output_file(output_dir: Path, audio_path: Path, extension: str) -> Path | None:
+    """Locate the file mlx-whisper wrote, tolerating stem/name naming differences."""
+    expected_output_file = output_dir / f"{audio_path.stem}.{extension}"
+    if expected_output_file.exists():
+        return expected_output_file
+
+    alt_output_file = output_dir / f"{audio_path.name}.{extension}"
+    if alt_output_file.exists():
+        return alt_output_file
+
+    candidates = sorted(output_dir.glob(f"*.{extension}"))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _run_mlx_whisper(
+    config: AppConfig,
+    audio_path: Path,
+    *,
+    state_dir: Path | None = None,
+    word_timestamps: bool = False,
+) -> tuple[str, List[TranscriptSegment]]:
+    """Run mlx-whisper CLI and return plain text plus segments (only when word_timestamps)."""
     mlx_whisper_cmd = _find_mlx_whisper()
+    output_format = "json" if word_timestamps else "txt"
 
     with tempfile.TemporaryDirectory(dir=str(state_dir) if state_dir else None) as tmpdir:
         output_dir = Path(tmpdir)
-        expected_output_file = output_dir / f"{audio_path.stem}.txt"
-        alt_output_file = output_dir / f"{audio_path.name}.txt"
 
         cmd: List[str] = [
             mlx_whisper_cmd,
             "--output-format",
-            "txt",
+            output_format,
             "--output-dir",
             str(output_dir),
             str(audio_path),
@@ -169,6 +270,9 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
             cmd.extend(["--model", config.transcription.model])
         if config.transcription.language != "auto":
             cmd.extend(["--language", config.transcription.language])
+        if word_timestamps:
+            # mlx-whisper's flag parser only accepts the literal string "True".
+            cmd.extend(["--word-timestamps", "True"])
 
         try:
             result = subprocess.run(
@@ -224,15 +328,7 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
                 msg += " Enable debug mode in config.yaml (llm.debug: true) for detailed logs."
             raise RuntimeError(msg) from exc
 
-        output_file: Path | None = None
-        if expected_output_file.exists():
-            output_file = expected_output_file
-        elif alt_output_file.exists():
-            output_file = alt_output_file
-        else:
-            txt_files = sorted(output_dir.glob("*.txt"))
-            if len(txt_files) == 1:
-                output_file = txt_files[0]
+        output_file = _find_output_file(output_dir, audio_path, output_format)
 
         if output_file is None:
             _debug_log_whisper(
@@ -242,14 +338,14 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
                 returncode=result.returncode,
                 stdout=result.stdout or "",
                 stderr=result.stderr or "",
-                error="mlx_whisper did not create a txt output file",
+                error=f"mlx_whisper did not create a {output_format} output file",
                 state_dir=state_dir,
             )
             # Do not treat stdout as transcription: CLI may print progress or other text.
             stdout_len = len(result.stdout or "")
             stderr_len = len(result.stderr or "")
             msg = (
-                "mlx_whisper did not create a txt output file "
+                f"mlx_whisper did not create a {output_format} output file "
                 f"(stdout={stdout_len} chars, stderr={stderr_len} chars). "
                 "The transcription may have failed silently. "
                 "Check that mlx_whisper is working correctly: `mlx_whisper --help`"
@@ -260,7 +356,38 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
                 msg += " Enable debug mode in config.yaml (llm.debug: true) for detailed logs."
             raise RuntimeError(msg)
 
-        text = output_file.read_text(encoding="utf-8").strip()
+        raw_output = output_file.read_text(encoding="utf-8")
+        segments: List[TranscriptSegment] = []
+
+        if word_timestamps:
+            try:
+                payload = json.loads(raw_output)
+            except json.JSONDecodeError as exc:
+                _debug_log_whisper(
+                    config,
+                    audio_path=audio_path,
+                    cmd=cmd,
+                    returncode=result.returncode,
+                    stdout=result.stdout or "",
+                    stderr=result.stderr or "",
+                    error="mlx_whisper json output is not valid JSON",
+                    state_dir=state_dir,
+                )
+                raise RuntimeError(
+                    "mlx_whisper produced an unreadable JSON transcript. "
+                    "Check that mlx_whisper supports `--output-format json --word-timestamps True`: "
+                    "`mlx_whisper --help`. Or disable diarization in config.yaml (diarization.enabled: false)."
+                ) from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    "mlx_whisper JSON transcript has an unexpected shape (expected an object). "
+                    "Disable diarization in config.yaml (diarization.enabled: false) to fall back to plain text."
+                )
+            segments = _drop_repeated_segments(_parse_whisper_json(payload))
+            text = "\n".join(segment.text.strip() for segment in segments).strip()
+        else:
+            text = raw_output.strip()
+
         if not text:
             _debug_log_whisper(
                 config,
@@ -269,7 +396,7 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
                 returncode=result.returncode,
                 stdout=result.stdout or "",
                 stderr=result.stderr or "",
-                error="empty transcription in txt output file",
+                error=f"empty transcription in {output_format} output file",
                 state_dir=state_dir,
             )
             raise RuntimeError(
@@ -278,20 +405,25 @@ def _run_mlx_whisper(config: AppConfig, audio_path: Path, *, state_dir: Path | N
                 "Check the audio file or try with a different file."
             )
 
-        return _remove_repetitions(text)
+        return _remove_repetitions(text), segments
 
 
 def transcribe_file(
-    config: AppConfig, audio_path: Path, *, state_dir: Path | None = None
+    config: AppConfig,
+    audio_path: Path,
+    *,
+    state_dir: Path | None = None,
+    word_timestamps: bool = False,
 ) -> TranscriptionResult:
+    """Transcribe one file. `word_timestamps` also returns segments (needed for diarization)."""
     audio_path = audio_path.expanduser().resolve()
     if not audio_path.exists():
         raise FileNotFoundError(audio_path)
 
     _ensure_supported_extension(config, audio_path)
 
-    text = _run_mlx_whisper(config, audio_path, state_dir=state_dir)
-    return TranscriptionResult(audio_path=audio_path, text=text)
+    text, segments = _run_mlx_whisper(config, audio_path, state_dir=state_dir, word_timestamps=word_timestamps)
+    return TranscriptionResult(audio_path=audio_path, text=text, segments=segments)
 
 
 def transcribe_many(

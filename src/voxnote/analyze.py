@@ -42,15 +42,12 @@ def _estimate_tokens_conservative(text: str) -> int:
     n_chars = len(text)
 
     # Estimate ratio of Cyrillic vs Latin characters
-    cyrillic_chars = sum(1 for c in text if "\u0400" <= c <= "\u04FF")
+    cyrillic_chars = sum(1 for c in text if "\u0400" <= c <= "\u04ff")
     cyrillic_ratio = cyrillic_chars / n_chars if n_chars > 0 else 0.0
 
     # Weighted average bytes per token based on language mix
     # Pure English: ~3.5 bytes/token, Pure Russian: ~5 bytes/token
-    avg_bytes_per_token = (
-        BYTES_PER_TOKEN_ENGLISH * (1 - cyrillic_ratio)
-        + BYTES_PER_TOKEN_RUSSIAN * cyrillic_ratio
-    )
+    avg_bytes_per_token = BYTES_PER_TOKEN_ENGLISH * (1 - cyrillic_ratio) + BYTES_PER_TOKEN_RUSSIAN * cyrillic_ratio
 
     approx = math.ceil(n_bytes / avg_bytes_per_token)
     return math.ceil(approx * TOKEN_SAFETY_MULTIPLIER)
@@ -155,13 +152,25 @@ def _debug_log_llm(
         pass
 
 
-def _build_payload(config: AppConfig, text: str) -> Dict[str, Any]:
+def _effective_system_prompt(config: AppConfig, *, speaker_labeled: bool) -> str:
+    """Append the speaker-label hint only for transcripts that actually carry labels."""
+    system_prompt = config.prompts.system_prompt
+    if not speaker_labeled:
+        return system_prompt
+
+    hint = (getattr(config.prompts, "speaker_labels_hint", "") or "").strip()
+    if not hint:
+        return system_prompt
+    return system_prompt.rstrip() + "\n" + hint
+
+
+def _build_payload(config: AppConfig, text: str, system_prompt: str) -> Dict[str, Any]:
     user_content = USER_PROMPT_PREFIX + text
     return {
         "model": config.llm.model,
         "format": "json",
         "messages": [
-            {"role": "system", "content": config.prompts.system_prompt},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": user_content,
@@ -187,7 +196,7 @@ def _extract_streamed_chat_content(resp: requests.Response) -> str:
             continue
 
         if isinstance(obj, dict) and obj.get("error"):
-            error_msg = obj.get('error', 'Unknown error')
+            error_msg = obj.get("error", "Unknown error")
             raise RuntimeError(
                 f"Ollama stream error: {error_msg}. "
                 f"Check that Ollama is running: `ollama serve` or verify the model exists: `ollama list`"
@@ -259,6 +268,7 @@ def _truncate_note_text(
     *,
     note_text: str,
     max_tokens: int,
+    system_prompt: str | None = None,
 ) -> str:
     """
     Truncate note text from the end to fit within max_tokens.
@@ -266,7 +276,9 @@ def _truncate_note_text(
     Preserves system prompt and user instruction prefix, only truncates
     the actual note content from the end.
     """
-    system_tokens = _count_tokens_with_fallback(config, prompt=config.prompts.system_prompt)
+    system_tokens = _count_tokens_with_fallback(
+        config, prompt=system_prompt if system_prompt is not None else config.prompts.system_prompt
+    )
 
     prefix_tokens = _count_tokens_with_fallback(config, prompt=USER_PROMPT_PREFIX)
 
@@ -313,11 +325,18 @@ def _truncate_note_text(
     return truncated.rstrip() + truncation_marker
 
 
-def analyze_text(config: AppConfig, text: str, *, state_dir: Path | None = None) -> NoteAnalysis:
+def analyze_text(
+    config: AppConfig,
+    text: str,
+    *,
+    state_dir: Path | None = None,
+    speaker_labeled: bool = False,
+) -> NoteAnalysis:
     url = config.llm.base_url.rstrip("/") + "/api/chat"
-    payload = _build_payload(config, text)
+    system_prompt = _effective_system_prompt(config, speaker_labeled=speaker_labeled)
+    payload = _build_payload(config, text, system_prompt)
 
-    prompt_for_count = config.prompts.system_prompt + "\n" + USER_PROMPT_PREFIX + text
+    prompt_for_count = system_prompt + "\n" + USER_PROMPT_PREFIX + text
     prompt_tokens = _count_tokens_with_fallback(config, prompt=prompt_for_count)
 
     logger.info(f"Estimated prompt tokens: {prompt_tokens}, text length: {len(text)} chars")
@@ -327,8 +346,8 @@ def analyze_text(config: AppConfig, text: str, *, state_dir: Path | None = None)
             f"Note text is too large ({prompt_tokens} tokens estimated). "
             f"Truncating from the end to fit within {DEFAULT_NUM_CTX} token context window."
         )
-        text = _truncate_note_text(config, note_text=text, max_tokens=DEFAULT_NUM_CTX)
-        payload = _build_payload(config, text)
+        text = _truncate_note_text(config, note_text=text, max_tokens=DEFAULT_NUM_CTX, system_prompt=system_prompt)
+        payload = _build_payload(config, text, system_prompt)
 
     payload["options"] = {"num_ctx": DEFAULT_NUM_CTX}
 
@@ -380,20 +399,16 @@ def analyze_text(config: AppConfig, text: str, *, state_dir: Path | None = None)
                 f"The model '{config.llm.model}' may not be following the JSON format requirement. "
                 "Check the system prompt in config.yaml (prompts.system_prompt) or try a different model."
             )
-            _debug_log_llm(
-                config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir
-            )
+            _debug_log_llm(config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir)
             raise RuntimeError(msg) from exc
-    
+
     if not isinstance(obj, dict):
         msg = (
             "Ollama returned JSON that is not an object. "
             f"The model '{config.llm.model}' may not be following the expected format. "
             "Check the system prompt in config.yaml (prompts.system_prompt) or try a different model."
         )
-        _debug_log_llm(
-            config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir
-        )
+        _debug_log_llm(config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir)
         raise RuntimeError(msg)
 
     missing_keys = [k for k in ("title", "category") if k not in obj]
@@ -403,9 +418,7 @@ def analyze_text(config: AppConfig, text: str, *, state_dir: Path | None = None)
             f"The model '{config.llm.model}' may not be following the system prompt correctly. "
             "Check the system prompt in config.yaml (prompts.system_prompt) or try a different model."
         )
-        _debug_log_llm(
-            config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir
-        )
+        _debug_log_llm(config, note_text=text, payload=payload, raw_content=content, error=msg, state_dir=state_dir)
         raise RuntimeError(msg)
 
     return NoteAnalysis(**obj)

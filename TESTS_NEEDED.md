@@ -116,6 +116,11 @@
 | `analyze_text()` | JSON with extra text | Extracts JSON block | Mock `_post_ollama_chat_with_retries` | P2 | TODO |
 | `analyze_text()` | Missing required keys | Raises `RuntimeError` | Mock `_post_ollama_chat_with_retries` | P1 | TODO |
 | `analyze_text()` | Invalid JSON | Raises `RuntimeError` | Mock `_post_ollama_chat_with_retries` | P1 | TODO |
+| `_effective_system_prompt()` | `speaker_labeled=True` | Hint appended once, configured prompt kept in full | None | P0 | Done |
+| `_effective_system_prompt()` | `speaker_labeled=False` | System prompt returned unchanged | None | P0 | Done |
+| `_effective_system_prompt()` | Empty / whitespace hint | System prompt returned unchanged | None | P1 | Done |
+| `analyze_text()` | Labeled transcript | System message and token count use the combined prompt | Mock `requests.post` | P1 | Done |
+| `analyze_text()` | Unlabeled transcript | System message carries no hint | Mock `requests.post` | P1 | Done |
 
 ### `transcribe.py`
 
@@ -133,6 +138,16 @@
 | `transcribe_file()` | Valid audio file | Returns `TranscriptionResult` | Mock `_run_mlx_whisper` | P1 | TODO |
 | `transcribe_file()` | Unsupported format | Raises `ValueError` | None | P1 | TODO |
 | `transcribe_file()` | File not found | Raises `FileNotFoundError` | None | P1 | TODO |
+| `_run_mlx_whisper()` | `word_timestamps=True` | Requests `--output-format json --word-timestamps True`, never `--clip-timestamps` | Mock `subprocess.run` | P0 | Done |
+| `_run_mlx_whisper()` | `word_timestamps=False` | Keeps the plain `txt` path, no segments | Mock `subprocess.run` | P0 | Done |
+| `_run_mlx_whisper()` | Unreadable JSON output | `RuntimeError` naming the diarization opt-out | Mock `subprocess.run` | P1 | Done |
+| `_parse_whisper_json()` | Segments with words | Segment/word timings parsed | None | P0 | Done |
+| `_parse_whisper_json()` | Missing timings, junk entries | First word anchored at the segment start, junk skipped | None | P1 | Done |
+| `_parse_whisper_json()` | Missing timings on a middle word | Anchored at the previous word's end, no block fragmentation | None | P0 | Done |
+| `_parse_whisper_json()` | Run of timing-less words | All anchored at the last timed word's end, one block | None | P1 | Done |
+| `_parse_whisper_json()` | Word with a start but no end | Zero-length at its own start, and it advances the cursor | None | P1 | Done |
+| `_drop_repeated_segments()` | Run longer than max_repeats | Keeps two copies with their own timings | None | P1 | Done |
+| `_drop_repeated_segments()` | Short run | Keeps every segment | None | P1 | Done |
 
 ### `vad_trim.py`
 
@@ -151,6 +166,57 @@
 | `trim_audio_file()` | No speech detected | Returns `False` | Mock VAD | P1 | TODO |
 | `trim_audio_file()` | `dry_run=True` | Returns `True`, no files created | Mock VAD | P1 | TODO |
 | `trim_audio_file()` | EXDEV error | Falls back to `shutil.move()` | Mock `os.replace` | P2 | TODO |
+
+### `speaker_merge.py`
+
+| Component | Scenario | Expected | Mocks | Priority | Status |
+|-----------|----------|----------|-------|----------|--------|
+| `assign_speakers()` | Words each inside one turn | Every word gets the turn containing it | None | P0 | Done |
+| `assign_speakers()` | Word straddling a turn boundary | Larger overlap wins in both directions (not first-hit) | None | P0 | Done |
+| `assign_speakers()` | Word overlapping a short interjection | Max overlap wins over midpoint containment | None | P0 | Done |
+| `assign_speakers()` | Equal overlap with two turns | Deterministic first-turn win | None | P1 | Done |
+| `assign_speakers()` | Equidistant nearest turns | Tie broken by turn start time | None | P1 | Done |
+| `assign_speakers()` | Word with no overlapping turn | Falls back to the nearest turn | None | P0 | Done |
+| `assign_speakers()` | Non-contiguous engine cluster ids | Labels renumbered 1..N by first appearance | None | P0 | Done |
+| `assign_speakers()` | Consecutive same-speaker words | Merged into one block with min/max timings | None | P0 | Done |
+| `assign_speakers()` | Segment without word timings | Whole segment assigned as one token | None | P1 | Done |
+| `assign_speakers()` | No turns / blank words | Returns `[]` / ignores blanks | None | P1 | Done |
+| `join_token_texts()` | Words with and without leading spaces | Single-spaced text either way | None | P1 | Done |
+| `render_labeled_transcript()` | Several blocks | `Speaker N: ...` separated by blank lines | None | P1 | Done |
+
+### `diarize.py`
+
+| Component | Scenario | Expected | Mocks | Priority | Status |
+|-----------|----------|----------|-------|----------|--------|
+| `diarization_fingerprint()` | Disabled | Returns `off` | None | P0 | Done |
+| `diarization_fingerprint()` | Each output-affecting setting changed | Fingerprint changes (parametrized over the payload) | None | P0 | Done |
+| `_fingerprint_payload()` | Payload contents | Lists exactly the output-affecting settings | None | P1 | Done |
+| `diarization_fingerprint()` | Only threads/timeout changed | Fingerprint unchanged | None | P1 | Done |
+| `resolve_diarization_models()` | No overrides | Paths under `<state_dir>/diarization/` | None | P1 | Done |
+| `resolve_diarization_models()` | Absolute / relative overrides | Absolute kept, relative under models dir | None | P1 | Done |
+| `ensure_diarization_models()` | Custom segmentation path missing | Actionable `RuntimeError`, no download | Mock `requests.get` | P0 | Done |
+| `ensure_diarization_models()` | Custom embedding path missing | Actionable `RuntimeError`, no download | Mock `requests.get` | P0 | Done |
+| `ensure_diarization_models()` | Segmentation download fails | Error names the member, target and segmentation release page | Mock `requests.get` | P0 | Done |
+| `ensure_diarization_models()` | Embedding download fails | Error names the file and the recognition release page | Mock `requests.get` | P0 | Done |
+| `_extract_archive_member()` | Corrupt (non-bz2) archive downloaded | Wrapped `RuntimeError` names member, release page and target | Mock `requests.get` | P0 | Done |
+| `_extract_archive_member()` | Truncated archive (valid bz2 prefix) | Same wrapped `RuntimeError` (the `EOFError` path) | Mock `requests.get` | P1 | Done |
+| `_extract_archive_member()` | Write fails mid-extraction | Actionable `RuntimeError`, `*.part` removed | Mock `shutil.copyfileobj` | P1 | Done |
+| `_extract_archive_member()` | Removing the partial fails too | Actionable `RuntimeError`, not the cleanup's own error | `target.parent` is a file | P1 | Done |
+| `_extract_archive_member()` | Archive without the expected member | Actionable `RuntimeError`, hint not duplicated | Mock `requests.get` | P1 | Done |
+| `diarize_audio()` | Unknown backend | Raises `RuntimeError` | None | P1 | Done |
+| `diarize_audio()` | sherpa-onnx not importable | Install-hint `RuntimeError` before any model download | Mock `_import_sherpa_onnx`, `ensure_diarization_models` | P1 | Done |
+| `_read_wav_mono_16k()` | Non-16k/stereo/non-WAV input | Returns `None` so ffmpeg decode runs | None | P2 | TODO |
+| `_debug_log_diarization()` | `llm.debug: true` | Writes turn timings only, no text | None | P2 | TODO |
+
+### `doctor.py`
+
+| Component | Scenario | Expected | Mocks | Priority | Status |
+|-----------|----------|----------|-------|----------|--------|
+| `_check_diarization()` | Default models missing | Hint promises the `voxnote process` auto-download | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Overridden model path missing | Hint says place the file manually or clear the override; no download promise | Mock engine probe | P0 | Done |
+| `_check_diarization()` | Bare-filename embedding override missing | Auto-download promise kept (release file) | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Models present (incl. overrides) | Model checks OK | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Diarization disabled | Single OK "Disabled" check | Mock engine probe | P1 | Done |
 
 ### `audio_prepare.py`
 
@@ -196,6 +262,19 @@
 | `vad_trim_files()` | Successful trim | Yields "completed" event | Mock `trim_audio_file` | P1 | TODO |
 | `vad_trim_files()` | No speech detected | Yields "skipped" event | Mock `trim_audio_file` | P1 | TODO |
 | `vad_trim_files()` | `dry_run=True` | Yields "completed" without creating files | Mock `trim_audio_file` | P1 | TODO |
+| `process_files()` | Diarization disabled | No diarize call, plain text, no `diarized` event, no `Speakers` header | Mock transcribe/analyze | P0 | Done |
+| `process_files()` | Diarization on, several speakers | `Speaker N:` note + labeled prompt + `diarized` event counts | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Diarization on, one speaker | Output identical to disabled run | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Trimmed cache present | Transcription and diarization use the same file | Mock transcribe/diarize | P0 | Done |
+| `process_files()` | Diarization turned on (off→on) | File reprocessed with an explanatory `info` event | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Diarization turned off (on→off) | Reprocessed into an unlabeled note, `off` fingerprint stored | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Diarization setting changed (on→on) | Reprocessed, a different `on:` fingerprint stored | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Legacy state entry (no fingerprint) | Still skipped while diarization stays off | Mock transcribe/analyze | P0 | Done |
+| `process_files()` | Failed-analysis retry with labels | Reuses labeled text, no re-transcription | Mock transcribe/diarize/analyze | P0 | Done |
+| `process_files()` | Failed-analysis retry after settings change | Re-transcribes instead of reusing text | Mock transcribe/diarize/analyze | P1 | Done |
+| `process_files()` | Engine/model preflight fails | One error event, zero-count summary, no per-file work | Mock `probe_diarization_engine` | P0 | Done |
+| `process_files()` | `diarize_audio` raises mid-file | Actionable error (doctor / `--no-diarize`), transcription never runs | Mock diarize | P0 | Done |
+| `process_files()` | `diarize=False` override | Diarization skipped despite config, `off` fingerprint stored | Mock transcribe/diarize | P1 | Done |
 
 ### `cli.py`
 
