@@ -188,6 +188,16 @@
 | `_read_wav_mono_16k()` | Non-16k/stereo/non-WAV input | Returns `None` so ffmpeg decode runs | None | P2 | TODO |
 | `_debug_log_diarization()` | `llm.debug: true` | Writes turn timings only, no text | None | P2 | TODO |
 
+### `doctor.py`
+
+| Component | Scenario | Expected | Mocks | Priority | Status |
+|-----------|----------|----------|-------|----------|--------|
+| `_check_diarization()` | Default models missing | Hint promises the `voxnote process` auto-download | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Overridden model path missing | Hint says place the file manually or clear the override; no download promise | Mock engine probe | P0 | Done |
+| `_check_diarization()` | Bare-filename embedding override missing | Auto-download promise kept (release file) | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Models present (incl. overrides) | Model checks OK | Mock engine probe | P1 | Done |
+| `_check_diarization()` | Diarization disabled | Single OK "Disabled" check | Mock engine probe | P1 | Done |
+
 ### `audio_prepare.py`
 
 | Component | Scenario | Expected | Mocks | Priority | Status |

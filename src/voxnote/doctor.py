@@ -8,7 +8,7 @@ from typing import List
 
 import requests
 
-from .diarize import probe_diarization_engine, resolve_diarization_models
+from .diarize import downloadable_diarization_models, probe_diarization_engine, resolve_diarization_models
 from .runtime import RuntimeContext
 
 
@@ -64,16 +64,19 @@ def _check_mlx_whisper() -> CheckResult:
     return CheckResult(name="mlx_whisper", ok=False, info="Not found in PATH or venv")
 
 
-def _check_diarization_model(label: str, path: Path) -> CheckResult:
+def _check_diarization_model(label: str, path: Path, *, downloadable: bool, override_key: str) -> CheckResult:
     if not path.exists():
-        return CheckResult(
-            name=label,
-            ok=False,
-            info=(
+        if downloadable:
+            info = (
                 f"Missing: {path}. It is downloaded on the next `voxnote process` run, "
                 "or place the file there manually."
-            ),
-        )
+            )
+        else:
+            info = (
+                f"Missing: {path}. Place the file there manually, "
+                f"or clear `{override_key}` in config.yaml to download the default model."
+            )
+        return CheckResult(name=label, ok=False, info=info)
     if not os.access(path, os.R_OK):
         return CheckResult(name=label, ok=False, info=f"Not readable: {path}. Fix it with `chmod +r {path}`.")
     return CheckResult(name=label, ok=True, info=str(path))
@@ -100,8 +103,23 @@ def _check_diarization(runtime: RuntimeContext) -> List[CheckResult]:
     ]
 
     segmentation, embedding = resolve_diarization_models(config, state_dir=runtime.state_dir)
-    results.append(_check_diarization_model("Diarization segmentation model", segmentation))
-    results.append(_check_diarization_model("Diarization embedding model", embedding))
+    segmentation_downloadable, embedding_downloadable = downloadable_diarization_models(config)
+    results.append(
+        _check_diarization_model(
+            "Diarization segmentation model",
+            segmentation,
+            downloadable=segmentation_downloadable,
+            override_key="diarization.segmentation_model",
+        )
+    )
+    results.append(
+        _check_diarization_model(
+            "Diarization embedding model",
+            embedding,
+            downloadable=embedding_downloadable,
+            override_key="diarization.embedding_model",
+        )
+    )
     return results
 
 

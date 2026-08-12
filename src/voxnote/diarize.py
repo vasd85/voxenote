@@ -64,6 +64,11 @@ def _resolve_model_path(value: str, *, models_dir: Path, default_relpath: str) -
     return models_dir / path
 
 
+def _is_downloadable_segmentation(value: str) -> bool:
+    """Only the empty default maps to the k2-fsa archive; any override means "user supplied"."""
+    return not (value or "").strip()
+
+
 def _is_downloadable_embedding(value: str) -> bool:
     """Only a bare filename maps to a file in the k2-fsa release; a path means "user supplied"."""
     raw = (value or "").strip()
@@ -87,6 +92,18 @@ def resolve_diarization_models(config: AppConfig, *, state_dir: Optional[Path] =
         default_relpath=DEFAULT_EMBEDDING_FILENAME,
     )
     return segmentation, embedding
+
+
+def downloadable_diarization_models(config: AppConfig) -> Tuple[bool, bool]:
+    """Which of (segmentation, embedding) `process` would auto-download when missing.
+
+    Mirrors the refusal checks in the `_ensure_*` helpers so callers (doctor) promise a
+    download only when one would actually happen.
+    """
+    return (
+        _is_downloadable_segmentation(config.diarization.segmentation_model),
+        _is_downloadable_embedding(config.diarization.embedding_model),
+    )
 
 
 def _download_file(url: str, target: Path, *, timeout_s: float, what: str, manual_hint: str) -> None:
@@ -129,7 +146,7 @@ def _extract_archive_member(archive: Path, member_name: str, target: Path) -> No
 
 
 def _ensure_segmentation_model(config: AppConfig, target: Path) -> None:
-    if (config.diarization.segmentation_model or "").strip():
+    if not _is_downloadable_segmentation(config.diarization.segmentation_model):
         raise RuntimeError(
             f"Diarization segmentation model not found: {target}. "
             f"Download {SEGMENTATION_ARCHIVE_URL}, extract '{SEGMENTATION_ARCHIVE_MEMBER}' and put it there, "
