@@ -171,8 +171,9 @@
 
 | Component | Scenario | Expected | Mocks | Priority | Status |
 |-----------|----------|----------|-------|----------|--------|
-| `assign_speakers()` | Words spanning two turns | Each word goes to its max-overlap turn | None | P0 | Done |
+| `assign_speakers()` | Words each inside one turn | Every word gets the turn containing it | None | P0 | Done |
 | `assign_speakers()` | Word straddling a turn boundary | Larger overlap wins in both directions (not first-hit) | None | P0 | Done |
+| `assign_speakers()` | Word overlapping a short interjection | Max overlap wins over midpoint containment | None | P0 | Done |
 | `assign_speakers()` | Equal overlap with two turns | Deterministic first-turn win | None | P1 | Done |
 | `assign_speakers()` | Equidistant nearest turns | Tie broken by turn start time | None | P1 | Done |
 | `assign_speakers()` | Word with no overlapping turn | Falls back to the nearest turn | None | P0 | Done |
