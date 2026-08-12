@@ -49,6 +49,7 @@ def _build_markdown(
     recorded_at: datetime,
     source_audio_name: str,
     audio_metadata_dump: Optional[str],
+    speaker_count: Optional[int] = None,
 ) -> str:
     ts_str = recorded_at.isoformat(sep=" ", timespec="seconds")
     lines = [
@@ -61,10 +62,17 @@ def _build_markdown(
         f"- **Category:** {analysis.category}",
         f"- **Whisper model:** {config.transcription.model}",
         f"- **Transcription language:** {config.transcription.language}",
-        "",
-        "---",
-        "",
     ]
+    # Only multi-speaker notes carry the field, so single-speaker notes stay byte-identical.
+    if speaker_count is not None and speaker_count > 1:
+        lines.append(f"- **Speakers:** {speaker_count}")
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+        ]
+    )
     if audio_metadata_dump:
         lines.extend(
             [
@@ -122,7 +130,7 @@ def _build_note_path(
     ts = created_at.strftime("%Y-%m-%d_%H-%M-%S")
     note_filename = f"{ts}_{title_slug}.md"
     note_path = category_dir / note_filename
-    
+
     # Handle collision by appending ID fragment
     if note_path.exists():
         note_path = category_dir / f"{ts}_{title_slug}_{note_id[:8]}.md"
@@ -151,8 +159,9 @@ def _build_note_content(
         recorded_at=recorded_at,
         source_audio_name=source_audio_name,
         audio_metadata_dump=audio_metadata_dump,
+        speaker_count=transcription.speaker_count,
     )
-    
+
     content_parts = [header]
     if analysis.short_summary:
         content_parts.append(analysis.short_summary.strip())
@@ -182,14 +191,14 @@ def organize_note(
     created_at = recorded_at
 
     archive_source = (source_audio_path or transcription.audio_path).expanduser().resolve()
-    
+
     # Pre-compute paths
     archive_filename = f"{note_id}_{archive_source.name}"
     note_path = _build_note_path(config, analysis, note_id, created_at)
     temp_note_path = note_path.with_suffix(".tmp")
-    
+
     audio_archive_path = None
-    
+
     try:
         # 1. Write note to temporary file
         note_content = _build_note_content(
@@ -203,7 +212,7 @@ def organize_note(
             audio_metadata_dump=audio_metadata_dump,
         )
         _write_note_content(temp_note_path, note_content)
-        
+
         # 2. Move audio to archive
         config.archive_dir.mkdir(parents=True, exist_ok=True)
         audio_archive_path = _archive_audio_file(
@@ -211,10 +220,10 @@ def organize_note(
             config=config,
             note_id=note_id,
         )
-        
+
         # 3. Atomically rename note from .tmp to .md
         temp_note_path.replace(note_path)
-        
+
     except Exception:
         # Rollback: return audio to original location if it was moved
         if audio_archive_path and audio_archive_path.exists():
@@ -225,14 +234,14 @@ def organize_note(
                     f"Failed to rollback audio file move: {rollback_exc}. "
                     f"Audio may remain in archive at {audio_archive_path}"
                 )
-        
+
         # Clean up temporary note file if it exists
         if temp_note_path.exists():
             try:
                 temp_note_path.unlink()
             except Exception:
                 pass
-        
+
         raise
 
     paths = NotePaths(note_path=note_path, audio_archive_path=audio_archive_path)
