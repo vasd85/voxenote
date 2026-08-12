@@ -100,6 +100,58 @@ def test_parse_whisper_json_anchors_missing_middle_word_timings_to_previous_word
     assert [(block.speaker, block.text) for block in blocks] == [(1, "one two three")]
 
 
+def test_parse_whisper_json_anchors_a_run_of_timing_less_words_to_the_last_timed_word() -> None:
+    payload = {
+        "segments": [
+            {
+                "start": 10.0,
+                "end": 20.0,
+                "text": " one two three four",
+                "words": [
+                    {"word": " one", "start": 15.5, "end": 16.5},
+                    {"word": " two"},
+                    {"word": " three", "start": None, "end": None},
+                    {"word": " four", "start": 17.0, "end": 18.0},
+                ],
+            }
+        ]
+    }
+
+    segments = transcribe._parse_whisper_json(payload)
+
+    # Both degraded words stay at the cursor instead of walking back to the segment start.
+    assert [(word.start, word.end) for word in segments[0].words[1:3]] == [(16.5, 16.5), (16.5, 16.5)]
+
+    # The worst pre-fix case: a run of degraded words used to split one utterance into three blocks.
+    turns = [SpeakerTurn(speaker=0, start=10.0, end=15.0), SpeakerTurn(speaker=1, start=15.0, end=20.0)]
+    blocks = assign_speakers(segments, turns)
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "one two three four")]
+
+
+def test_parse_whisper_json_advances_the_cursor_for_a_word_without_an_end() -> None:
+    payload = {
+        "segments": [
+            {
+                "start": 10.0,
+                "end": 20.0,
+                "text": " one two three",
+                "words": [
+                    {"word": " one", "start": 15.0, "end": 15.4},
+                    {"word": " two", "start": 16.0},
+                    {"word": " three"},
+                ],
+            }
+        ]
+    }
+
+    segments = transcribe._parse_whisper_json(payload)
+
+    # A word with a start but no end is a zero-length token at its own start...
+    assert (segments[0].words[1].start, segments[0].words[1].end) == (16.0, 16.0)
+    # ...and it still moves the cursor, so the next degraded word anchors there and not at 15.4.
+    assert (segments[0].words[2].start, segments[0].words[2].end) == (16.0, 16.0)
+
+
 def test_parse_whisper_json_without_segments_returns_empty() -> None:
     assert transcribe._parse_whisper_json({}) == []
     assert transcribe._parse_whisper_json({"segments": "nope"}) == []

@@ -10,7 +10,7 @@ from freezegun import freeze_time
 
 from voxnote import workflow as workflow_module
 from voxnote.audio_metadata import AudioMetadata
-from voxnote.diarize import DIARIZATION_DISABLED_FINGERPRINT, diarization_fingerprint
+from voxnote.diarize import DIARIZATION_DISABLED_FINGERPRINT
 from voxnote.models import (
     AppConfig,
     DiarizationConfig,
@@ -260,6 +260,64 @@ def test_enabling_diarization_forces_reprocessing(
 
 
 @freeze_time("2024-01-01 12:00:00")
+def test_disabling_diarization_forces_reprocessing_into_an_unlabeled_note(
+    tmp_path: Path, boundaries: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = _make_workflow(tmp_path, enabled=True)
+    _install_diarization(monkeypatch, boundaries, TWO_SPEAKER_TURNS)
+    audio = _add_audio(workflow)
+
+    assert "Speaker 1:" in _note_text(list(workflow.process_files()))
+
+    # Same audio, diarization switched off in config: the note must lose its labels again.
+    _restore_audio(workflow, audio)
+    disabled = _make_workflow(tmp_path, enabled=False)
+    events = list(disabled.process_files())
+
+    assert any(event.type == "info" and "diarization settings changed" in event.message for event in events)
+    summary = next(event for event in events if event.type == "summary")
+    assert summary.data["processed"] == 1
+    assert len(boundaries.diarize_calls) == 1  # not diarized a second time
+
+    note = _note_text(events)
+    assert "Speaker 1:" not in note
+    assert "**Speakers:**" not in note
+
+    entry = find_processed_entry(_hash_of(audio, tmp_path), state_dir=disabled.state_dir)
+    assert entry is not None
+    assert entry["diarization_fingerprint"] == DIARIZATION_DISABLED_FINGERPRINT
+
+
+@freeze_time("2024-01-01 12:00:00")
+def test_changed_diarization_settings_force_reprocessing(
+    tmp_path: Path, boundaries: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = _make_workflow(tmp_path, enabled=True)
+    _install_diarization(monkeypatch, boundaries, TWO_SPEAKER_TURNS)
+    audio = _add_audio(workflow)
+
+    list(workflow.process_files())
+    original_hash = _hash_of(audio, tmp_path)
+    before = find_processed_entry(original_hash, state_dir=workflow.state_dir)
+    assert before is not None
+
+    # Diarization stays on, but a setting that changes its output moved.
+    _restore_audio(workflow, audio)
+    retuned = _make_workflow(tmp_path, enabled=True, num_speakers=2)
+    events = list(retuned.process_files())
+
+    assert any(event.type == "info" and "diarization settings changed" in event.message for event in events)
+    summary = next(event for event in events if event.type == "summary")
+    assert summary.data["processed"] == 1
+    assert len(boundaries.diarize_calls) == 2
+
+    after = find_processed_entry(original_hash, state_dir=retuned.state_dir)
+    assert after is not None
+    assert after["diarization_fingerprint"].startswith("on:")
+    assert after["diarization_fingerprint"] != before["diarization_fingerprint"]
+
+
+@freeze_time("2024-01-01 12:00:00")
 def test_legacy_entry_without_fingerprint_is_still_skipped(tmp_path: Path, boundaries: _Recorder) -> None:
     workflow = _make_workflow(tmp_path, enabled=False)
     audio = _add_audio(workflow)
@@ -399,14 +457,18 @@ def test_cli_override_can_force_diarization_off(
 ) -> None:
     workflow = _make_workflow(tmp_path, enabled=True)
     _install_diarization(monkeypatch, boundaries, TWO_SPEAKER_TURNS)
-    _add_audio(workflow)
+    audio = _add_audio(workflow)
 
     events = list(workflow.process_files(diarize=False))
 
     assert boundaries.diarize_calls == []
     assert boundaries.transcribe_calls[0]["word_timestamps"] is False
     assert not any(event.type == "diarized" for event in events)
-    assert diarization_fingerprint(workflow.config) == DIARIZATION_DISABLED_FINGERPRINT
+
+    # The state records the "off" run, so a later enabled run reprocesses the file.
+    entry = find_processed_entry(_hash_of(audio, tmp_path), state_dir=workflow.state_dir)
+    assert entry is not None
+    assert entry["diarization_fingerprint"] == DIARIZATION_DISABLED_FINGERPRINT
 
 
 def _hash_of(audio: Path, tmp_path: Path) -> str:

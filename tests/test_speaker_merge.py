@@ -37,6 +37,47 @@ def test_words_go_to_the_turn_they_overlap_most() -> None:
     ]
 
 
+def test_word_straddling_a_boundary_goes_to_the_turn_it_overlaps_most() -> None:
+    # " two" spans the 2.0 boundary: 0.2 s in the first turn, 0.4 s in the second one.
+    segments = [_segment(" one two", 0.0, 3.0, [(" one", 0.0, 1.0), (" two", 1.8, 2.4)])]
+    turns = [SpeakerTurn(start=0.0, end=2.0, speaker=0), SpeakerTurn(start=2.0, end=4.0, speaker=1)]
+
+    blocks = assign_speakers(segments, turns)
+
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "one"), (2, "two")]
+
+
+def test_word_straddling_a_boundary_stays_with_the_larger_earlier_overlap() -> None:
+    # Mirror image of the case above: 0.4 s in the first turn against 0.2 s in the second one,
+    # so picking the first turn with *any* overlap and picking the largest one differ again.
+    segments = [_segment(" one two", 0.0, 3.0, [(" one", 0.0, 1.0), (" two", 1.6, 2.2)])]
+    turns = [SpeakerTurn(start=0.0, end=2.0, speaker=0), SpeakerTurn(start=2.0, end=4.0, speaker=1)]
+
+    blocks = assign_speakers(segments, turns)
+
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "one two")]
+
+
+def test_equal_overlap_is_broken_deterministically_by_turn_order() -> None:
+    # 0.5 s in each turn: the tie must resolve to the first turn, not to the last one seen.
+    segments = [_segment(" one two", 0.0, 3.0, [(" one", 0.0, 1.0), (" two", 1.5, 2.5)])]
+    turns = [SpeakerTurn(start=0.0, end=2.0, speaker=0), SpeakerTurn(start=2.0, end=4.0, speaker=1)]
+
+    blocks = assign_speakers(segments, turns)
+
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "one two")]
+
+
+def test_nearest_turn_ties_are_broken_by_start_time() -> None:
+    # " gap" sits in silence exactly 0.5 s from both turns; the earlier turn wins the tie.
+    segments = [_segment(" first gap", 0.0, 3.0, [(" first", 0.2, 0.8), (" gap", 1.5, 2.5)])]
+    turns = [SpeakerTurn(start=0.0, end=1.0, speaker=5), SpeakerTurn(start=3.0, end=4.0, speaker=6)]
+
+    blocks = assign_speakers(segments, turns)
+
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "first gap")]
+
+
 def test_word_without_overlap_falls_back_to_nearest_turn() -> None:
     # The word sits in a gap between turns, closer to the second one.
     segments = [_segment(" word", 0.0, 5.0, [(" word", 4.0, 4.2)])]

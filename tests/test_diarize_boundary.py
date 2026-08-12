@@ -12,6 +12,7 @@ from voxnote.diarize import (
     DEFAULT_SEGMENTATION_RELPATH,
     DIARIZATION_DISABLED_FINGERPRINT,
     SEGMENTATION_ARCHIVE_MEMBER,
+    SEGMENTATION_RELEASE_PAGE,
     diarization_fingerprint,
     ensure_diarization_models,
     resolve_diarization_models,
@@ -45,12 +46,39 @@ def test_fingerprint_is_off_when_disabled(tmp_path: Path) -> None:
     assert diarization_fingerprint(config) == DIARIZATION_DISABLED_FINGERPRINT
 
 
-def test_fingerprint_changes_with_relevant_settings(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"num_speakers": 2},
+        {"cluster_threshold": 0.42},
+        {"min_duration_on": 0.9},
+        {"min_duration_off": 0.9},
+        {"segmentation_model": "custom/seg.onnx"},
+        {"embedding_model": "custom.onnx"},
+    ],
+    ids=lambda changed: next(iter(changed)),
+)
+def test_fingerprint_changes_with_every_output_affecting_setting(tmp_path: Path, changed: dict) -> None:
     base = diarization_fingerprint(_make_config(tmp_path, enabled=True))
-    other = diarization_fingerprint(_make_config(tmp_path, enabled=True, num_speakers=2))
+    other = diarization_fingerprint(_make_config(tmp_path, enabled=True, **changed))
 
     assert base.startswith("on:")
     assert base != other
+
+
+def test_fingerprint_payload_lists_exactly_the_output_affecting_settings(tmp_path: Path) -> None:
+    # Guards the parametrization above: a new payload field must come with its own case.
+    payload = diarize._fingerprint_payload(_make_config(tmp_path, enabled=True))
+
+    assert set(payload) == {
+        "backend",
+        "num_speakers",
+        "cluster_threshold",
+        "min_duration_on",
+        "min_duration_off",
+        "segmentation_model",
+        "embedding_model",
+    }
 
 
 def test_fingerprint_ignores_settings_that_do_not_change_output(tmp_path: Path) -> None:
@@ -118,7 +146,31 @@ def test_missing_custom_embedding_path_is_not_downloaded(tmp_path: Path, monkeyp
     assert "diarization.embedding_model" in message
 
 
-def test_download_failure_message_points_at_the_release_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_segmentation_download_failure_points_at_the_release_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing is pre-created here, so the segmentation archive is the first thing fetched.
+    config = _make_config(tmp_path, enabled=True)
+    target = tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH
+
+    def broken_get(*args, **kwargs):
+        raise OSError("network is unreachable")
+
+    monkeypatch.setattr(diarize.requests, "get", broken_get)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    message = str(excinfo.value)
+    assert "network is unreachable" in message
+    assert SEGMENTATION_ARCHIVE_MEMBER in message
+    assert SEGMENTATION_RELEASE_PAGE in message
+    assert str(target) in message
+    # The run stopped at the segmentation model instead of reporting the embedding one.
+    assert DEFAULT_EMBEDDING_FILENAME not in message
+
+
+def test_embedding_download_failure_points_at_the_release_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     segmentation = tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH
     segmentation.parent.mkdir(parents=True, exist_ok=True)
     segmentation.write_bytes(b"fake-model")
@@ -158,12 +210,12 @@ class _FakeStreamedResponse:
         yield self._body
 
 
-def _segmentation_archive_bytes(tmp_path: Path, *, payload: bytes) -> bytes:
+def _segmentation_archive_bytes(tmp_path: Path, *, payload: bytes, member: str = SEGMENTATION_ARCHIVE_MEMBER) -> bytes:
     source = tmp_path / "source_model.onnx"
     source.write_bytes(payload)
     archive = tmp_path / "source.tar.bz2"
     with tarfile.open(archive, "w:bz2") as tar:
-        tar.add(source, arcname=SEGMENTATION_ARCHIVE_MEMBER)
+        tar.add(source, arcname=member)
     return archive.read_bytes()
 
 
@@ -184,6 +236,32 @@ def test_corrupt_segmentation_archive_is_an_actionable_error(tmp_path: Path, mon
     assert SEGMENTATION_ARCHIVE_MEMBER in message
     assert "speaker-segmentation-models" in message
     assert str(tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH) in message
+
+
+def test_archive_without_the_expected_member_is_an_actionable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A readable archive whose layout changed upstream: the member lookup, not bz2, is what fails.
+    config = _make_config(tmp_path, enabled=True)
+    target = tmp_path / ".voxnote" / "diarization" / DEFAULT_SEGMENTATION_RELPATH
+    _serve_archive(
+        monkeypatch,
+        _segmentation_archive_bytes(
+            tmp_path,
+            payload=b"fake-model",
+            member="sherpa-onnx-pyannote-segmentation-3-0/renamed.onnx",
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        ensure_diarization_models(config, state_dir=tmp_path / ".voxnote")
+
+    message = str(excinfo.value)
+    assert f"does not contain '{SEGMENTATION_ARCHIVE_MEMBER}'" in message
+    assert str(target) in message
+    # This branch raises inside the extraction guard: the hint must be stated once, not twice.
+    assert message.count(SEGMENTATION_RELEASE_PAGE) == 1
+    assert not target.exists()
 
 
 def test_truncated_segmentation_archive_is_an_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
