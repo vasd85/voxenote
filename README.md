@@ -5,6 +5,7 @@ CLI tool for fully local processing of personal audio notes on macOS with Apple 
 - Prepares audio files for processing (mono 16kHz WAV with denoise/normalization) to improve transcription quality.
 - Removes silence from audio files using Silero VAD (optional preprocessing step).
 - Transcribes audio files to text using `mlx-whisper` (Apple Silicon optimized).
+- Optionally labels who says what in multi-speaker recordings (`Speaker 1:` / `Speaker 2:` blocks) using `sherpa-onnx`.
 - Analyzes note content with a local LLM via Ollama (`qwen2.5:32b-instruct-q4_K_M`).
 - Generates a meaningful title and high-level category.
 - Creates a structured Markdown note file.
@@ -27,6 +28,7 @@ No cloud LLMs are used: all processing happens on your machine.
 - `mlx-whisper` and `Ollama` with model `qwen2.5:32b-instruct-q4_K_M` installed.
 - `ffmpeg` (for VAD trimming feature): `brew install ffmpeg`
 - `torch`, `torchaudio`, and `torchcodec` (PyTorch) — installed automatically via `uv sync` for Silero VAD.
+- `sherpa-onnx` — installed automatically via `uv sync`; CPU-only ONNX runtime used for optional speaker diarization.
 
 ---
 
@@ -45,6 +47,8 @@ voxnote/
 │       ├── transcribe.py    # Transcription via mlx-whisper
 │       ├── analyze.py       # Text analysis via Ollama (Qwen)
 │       ├── organize.py      # Markdown creation & audio archiving
+│       ├── diarize.py       # Speaker diarization via sherpa-onnx (models + engine)
+│       ├── speaker_merge.py # Word -> speaker assignment, `Speaker N:` blocks
 │       ├── vad_trim.py      # Silence removal via Silero VAD
 │       ├── models.py        # Pydantic models (config, results, contexts)
 │       ├── audio_metadata.py # Audio metadata extraction (recorded_at, etc.)
@@ -162,6 +166,21 @@ You can change this later in `config.yaml`.
 
 The Silero VAD model is downloaded automatically on first use via `torch.hub` and cached in `.voxnote/torch_cache/`. No manual setup required.
 
+### 5. Speaker diarization models (optional)
+
+Only needed if you turn on `diarization.enabled`. Two models (~35 MB total) are downloaded once from the
+[k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) GitHub releases — no Hugging Face account or token — and cached in
+`.voxnote/diarization/`:
+
+- segmentation: `sherpa-onnx-pyannote-segmentation-3-0/model.onnx` (MIT),
+- speaker embedding: `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`.
+
+After that first download everything runs offline. If the download fails, the error names the file and where to put it;
+you can also fetch them by hand from the
+[segmentation](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) and
+[embedding](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) release pages and drop them
+into `.voxnote/diarization/`. `uv run voxnote doctor` reports whether both files are present and readable.
+
 ---
 
 ## Processing pipeline
@@ -171,7 +190,7 @@ The typical processing flow consists of several optional steps:
 1. **Collect** audio files from source directories into `input/`
 2. **Prepare** audio for VAD (recommended): converts to mono 16kHz WAV with denoise/normalization
 3. **VAD trim** (optional): removes silence segments to speed up transcription
-4. **Process**: transcribes, analyzes, and organizes notes
+4. **Process**: transcribes, optionally labels speakers, analyzes, and organizes notes
 
 Steps 2-3 create cached intermediate files (`.voxnote/prepared/` and `.voxnote/trimmed/`) that are reused on subsequent runs. The `process` command automatically uses the best available cache (trimmed > prepared > original).
 
@@ -221,6 +240,18 @@ vad:
   min_silence_duration_ms: 1200
   min_speech_duration_ms: 200
   speech_pad_ms: 300
+
+diarization:
+  enabled: false           # off by default
+  backend: sherpa_onnx
+  num_speakers: 0          # exact speaker count when you know it; 0 = detect automatically
+  cluster_threshold: 0.5   # used only when num_speakers is 0
+  min_duration_on: 0.3
+  min_duration_off: 0.5
+  num_threads: 2
+  segmentation_model: ""
+  embedding_model: ""
+  download_timeout_s: 600
 ```
 
 See `config.example.yaml` for the full template (single source of truth).
@@ -231,12 +262,75 @@ See `config.example.yaml` for the full template (single source of truth).
 
 ---
 
+## Speaker diarization (optional)
+
+For recordings with more than one voice, voxnote can split the transcript into speaker blocks instead of one flat text
+blob. It is **off by default**. Turn it on in `config.yaml`:
+
+```yaml
+diarization:
+  enabled: true
+```
+
+or per run, in either direction:
+
+```bash
+uv run voxnote process --diarize
+```
+
+```bash
+uv run voxnote process --no-diarize
+```
+
+How it works: `process` transcribes with word-level timestamps, runs offline diarization (`sherpa-onnx`) on the **same**
+audio file it transcribed (trimmed > prepared > original, so both share one timeline), assigns every word to the speaker
+turn it overlaps most, and merges consecutive words of one speaker into `Speaker N:` blocks. Labels are numbered in order
+of first appearance and are local to a single note — `Speaker 1` in two notes is not the same person.
+
+The labeled transcript goes into both the note body and the LLM analysis, so titles and summaries can reflect the
+dialogue. Notes also gain a `- **Speakers:** N` header field.
+
+### Tuning
+
+| Setting | What it does |
+|---|---|
+| `num_speakers` | Exact number of speakers when you know it. **The most effective knob** — set it to 2 for an interview. `0` = detect automatically. |
+| `cluster_threshold` | Only used when `num_speakers: 0`. Distance threshold for grouping voices: **lower = more speakers**, higher = fewer. Start at `0.5` and lower it if voices get merged. |
+| `min_duration_on` | Speech turns shorter than this (seconds) are dropped. |
+| `min_duration_off` | Silence shorter than this (seconds) does not split a turn. |
+| `num_threads` | ONNX threads. Diarization is CPU-only and runs far faster than real time. |
+| `segmentation_model` / `embedding_model` | Leave empty for the defaults. A bare file name for `embedding_model` (e.g. `nemo_en_titanet_small.onnx`) is downloaded from the k2-fsa embedding release; a path (absolute, or relative to `.voxnote/diarization/`) is used as-is and never downloaded. |
+
+`prompts.speaker_labels_hint` in `config.yaml` is the extra instruction appended to the system prompt for labeled
+transcripts only — edit it if you want the LLM to treat the dialogue differently. It repeats the prompt-injection guard,
+so keep that part when you change it.
+
+### Limitations
+
+- **Similar voices may be merged into one speaker.** This is the most common failure; set `num_speakers` when you know
+  the count, or lower `cluster_threshold`.
+- Whisper word timestamps are a heuristic, so a word or two may land on the wrong side of a speaker change.
+- `vad-trim` removes the pauses that segmentation partly relies on, so turn boundaries near splice points can blur.
+  Word-level assignment limits the damage, but for tricky recordings try `pipeline.vad_trim: false`.
+- Overlapping speech is not modeled: each word gets exactly one speaker.
+- Speakers are not tracked across recordings — no voice profiles, no names.
+- If diarization finds a single speaker, the note is written exactly as it would be with diarization off.
+- Diarization makes whisper emit word timestamps, which slightly changes how it advances through the audio. The wording
+  of a diarized transcript can therefore differ here and there from a non-diarized run of the same file.
+
+Changing any of these settings makes `process` re-run files whose notes were produced with the old settings; nothing is
+re-processed when the settings are unchanged.
+
+---
+
 ## Privacy & local state
 
 - Everything is designed to run locally: transcription (`mlx-whisper`) and LLM analysis (Ollama) both run on your machine.
 - Runtime state and caches are stored under `.voxnote/` (JSONL indexes + caches like `prepared/` and `trimmed/`).
 - `.voxnote/` is gitignored. For extra safety, `.cursorignore` excludes `.voxnote/*.jsonl` to avoid IDE indexing of transcripts.
-- The CLI avoids printing full transcription / note text to the terminal by default (treat it as sensitive data).
+- The CLI avoids printing full transcription / note text to the terminal by default (treat it as sensitive data). Speaker diarization reports only counts (speakers, turns), never text.
+- Diarization models are the only thing fetched from the network, once, from GitHub releases. Nothing is uploaded, ever.
+- With `llm.debug: true`, diarization also appends turn timings (start/end/speaker — no text) to `.voxnote/diarization_debug.jsonl`.
 
 ---
 
@@ -262,6 +356,24 @@ Short summary.
 ---
 
 Full transcription text...
+```
+
+With diarization enabled and more than one speaker detected, the header gains a `Speakers` field and the transcript is
+split into blocks:
+
+```markdown
+- **Transcription language:** auto
+- **Speakers:** 2
+
+---
+
+Short summary.
+
+---
+
+Speaker 1: So what did you think of the proposal?
+
+Speaker 2: It looks solid, but the timeline is tight.
 ```
 
 Key points:
@@ -314,6 +426,8 @@ To rebuild caches and reprocess everything from scratch:
 ```bash
 uv run voxnote run --force
 ```
+
+`run` also accepts `--diarize` / `--no-diarize` to override `diarization.enabled` for that run.
 
 The individual step commands below remain available for running a single step.
 
@@ -452,18 +566,22 @@ uv run voxnote process --file "note.m4a"
 - `--file` is a **path relative to `input/`** (you can also use subdirectories, e.g. `subdir/note.m4a`).
 - To print per-file metadata, pass `--show-metadata`.
 - To reprocess files that were already processed, use `--force`.
+- To force speaker diarization on or off for this run, pass `--diarize` or `--no-diarize` (overrides
+  `diarization.enabled`; see [Speaker diarization](#speaker-diarization-optional)).
 
 What happens for each file:
 
 1. The best available audio source is selected: trimmed cache (if exists) > prepared cache (if exists) > original file.
 2. `mlx-whisper` transcribes audio to text.
-3. The text is sent to `qwen2.5:32b-instruct-q4_K_M` via Ollama.
-4. The model returns a JSON payload with `title`, `category`, and `short_summary`.
-5. A Markdown note is created at `output/<category-slug>/<YYYY-MM-DD_HH-MM-SS>_<title-slug>.md`.
-6. The original audio file is archived as `archive/<uuid>_<original_name>` (moved from `input/` after success).
-7. The file's SHA256 hash and metadata are appended to `.voxnote/processed_audio.jsonl` so it won't be imported again.
+3. If diarization is enabled, the same audio file is diarized and the transcript is split into `Speaker N:` blocks.
+4. The text is sent to `qwen2.5:32b-instruct-q4_K_M` via Ollama.
+5. The model returns a JSON payload with `title`, `category`, and `short_summary`.
+6. A Markdown note is created at `output/<category-slug>/<YYYY-MM-DD_HH-MM-SS>_<title-slug>.md`.
+7. The original audio file is archived as `archive/<uuid>_<original_name>` (moved from `input/` after success).
+8. The file's SHA256 hash and metadata are appended to `.voxnote/processed_audio.jsonl` so it won't be imported again.
 
-If a file was already processed (same content hash), it is skipped unless `--force` is used.
+If a file was already processed (same content hash), it is skipped unless `--force` is used, or unless the diarization
+settings changed since its note was written.
 
 If you keep multiple configs, add `--config path/to/config.yaml` to any command.
 
@@ -485,6 +603,9 @@ uv run voxnote doctor
 ```
 
 Checks presence of `ffmpeg`, `ffprobe`, `mlx-whisper`, reachability of Ollama, and that the shipped denoise model `std.rnnn` is present.
+
+When `diarization.enabled` is true it also checks that `sherpa-onnx` is importable and that both diarization models are
+present and readable; when it is false the table just reports diarization as disabled.
 
 ---
 

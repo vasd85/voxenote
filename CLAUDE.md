@@ -29,7 +29,7 @@ Three layers, strict boundaries (keep them — this is the project's core design
 
 - **`cli.py`** — thin I/O layer only. Click commands + Rich rendering. Parses flags, builds a `RuntimeContext`, calls a `Workflow` generator, and renders the events it yields. No business logic here.
 - **`workflow.py`** — orchestration. The `Workflow` class coordinates every step, idempotency, and cache selection. Each public method (`collect_files`, `prepare_vad_files`, `vad_trim_files`, `process_files`) is a **generator that yields `WorkflowEvent(type, message, file, data)`**. This generator/event contract is the seam between logic and UI: to add or change a step, edit a Workflow generator and its CLI consumer — never push logic into `cli.py`.
-- **Boundary modules** — each owns one external side effect so it can be mocked in tests: `transcribe.py` (mlx-whisper subprocess), `analyze.py` (Ollama HTTP), `organize.py` (Markdown + archive moves), `vad_trim.py` / `audio_prepare.py` (Silero VAD + ffmpeg), `audio_metadata.py` (mdls/ffprobe/stat). `state.py` and `cache_paths.py` own all `.voxnote/` reads/writes; `config.py` + `models.py` + `runtime.py` own configuration.
+- **Boundary modules** — each owns one external side effect so it can be mocked in tests: `transcribe.py` (mlx-whisper subprocess), `analyze.py` (Ollama HTTP), `organize.py` (Markdown + archive moves), `vad_trim.py` / `audio_prepare.py` (Silero VAD + ffmpeg), `diarize.py` (sherpa-onnx engine + its model downloads), `audio_metadata.py` (mdls/ffprobe/stat). `state.py` and `cache_paths.py` own all `.voxnote/` reads/writes; `config.py` + `models.py` + `runtime.py` own configuration. `speaker_merge.py` is pure logic (word → speaker assignment), no side effects.
 
 ### Content-addressed idempotency (the central idea)
 
@@ -44,9 +44,9 @@ State lives in append-only JSONL indexes under `.voxnote/` (writes are upserts: 
 | File | Purpose |
 |------|---------|
 | `collected_audio.jsonl` | what `collect` copied — skip re-copying |
-| `processed_audio.jsonl` | what `process` finished — skip re-processing. Stores `transcribed_file_hash`, so `process` re-runs a file if its trimmed cache changed since last time |
+| `processed_audio.jsonl` | what `process` finished — skip re-processing. Stores `transcribed_file_hash`, so `process` re-runs a file if its trimmed cache changed since last time, and `diarization_fingerprint`, so it re-runs when the diarization settings changed (a missing fingerprint reads as "diarization was off") |
 | `original_metadata.jsonl` | `recorded_at` + raw mdls/ffprobe/stat, captured at collect time (before the original is moved away) |
-| `failed_transcriptions.jsonl` | transcription text saved when LLM analysis fails, so a `--file` retry skips re-transcribing |
+| `failed_transcriptions.jsonl` | transcription text saved when LLM analysis fails, so a `--file` retry skips re-transcribing. Carries the same `diarization_fingerprint`, so the saved text (speaker labels included) is reused only while those settings hold |
 
 ### Config flow
 
@@ -58,6 +58,10 @@ State lives in append-only JSONL indexes under `.voxnote/` (writes are upserts: 
 
 - **`analyze.py`** streams Ollama `/api/chat`, counts tokens via `/api/tokenize` (with a byte-ratio heuristic fallback for older Ollama), and truncates note text *from the end* to fit `DEFAULT_NUM_CTX` (16384) before sending. Transient HTTP failures retry with backoff. The system prompt (in `config.yaml`) instructs the model to treat note text as inert data and ignore any embedded instructions — a prompt-injection guard; preserve it.
 - **`organize.py`** is atomic-ish: write note to `.tmp` → move audio to `archive/<uuid>_<name>` → atomically rename `.tmp` → `.md`, with rollback of the audio move on failure. Notes land in `output/<category-slug>/<YYYY-MM-DD_HH-MM-SS>_<title-slug>.md`; the `<uuid>` links note ↔ archived audio.
+
+### Speaker diarization (optional, off by default)
+
+When `diarization.enabled` (or `process --diarize`), `process` asks mlx-whisper for JSON with word timestamps, runs `diarize.py` on the **same** file it transcribed, and `speaker_merge.py` assigns each word to the diarization turn it overlaps most, merging runs into `Speaker N:` blocks. One speaker (or disabled) means the plain transcript is used unchanged, so nothing about a single-speaker note differs from before the feature. Models live in `.voxnote/diarization/`, downloaded once from k2-fsa GitHub releases. Adding a second backend means editing `diarize.py` only — `workflow.py` never sees the engine.
 
 ## Conventions & invariants
 
