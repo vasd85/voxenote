@@ -50,9 +50,9 @@ State lives in append-only JSONL indexes under `.voxnote/` (writes are upserts: 
 
 ### Config flow
 
-`config.yaml` (project root, gitignored) → `config.py:load_config` normalizes relative paths **against the config file's own directory** and creates `input/`/`output/`/`archive/` → `models.py:AppConfig` (Pydantic, validated) → `runtime.py:RuntimeContext` (adds `project_root` + the `.voxnote/` state dir). `DEFAULT_CONFIG_PATH` resolves to the repo root.
+`config.yaml` → `config.py:load_config` normalizes relative paths **against the config file's own directory** and creates `input/`/`output/`/`archive/` → `models.py:AppConfig` (Pydantic, validated) → `runtime.py:RuntimeContext` (adds `project_root` + the state dir). Config location is resolved by `config.py:resolve_config_path`: `--config` > `$VOXNOTE_CONFIG` > `~/.config/voxnote/config.yaml` (honors `$XDG_CONFIG_HOME`) > `./config.yaml` in CWD > repo-root `DEFAULT_CONFIG_PATH` (dev fallback). The state dir is resolved by `resolve_state_dir`: an existing project-local `.voxnote/` wins (backward compat); otherwise the global user config uses `~/Library/Application Support/voxnote/`.
 
-`voxnote init` copies `config.example.yaml` **verbatim** — that template is the single source of truth for defaults. **Adding a config key requires touching three places: the Pydantic model in `models.py`, the `config.example.yaml` template, and `README.md` if user-facing.** Pydantic field defaults exist as a safety net but the template is what users actually get.
+`voxnote init` writes a default config (target chosen by `config.py:init_target` — the user path `~/.config/voxnote/config.yaml` unless `--config`/`$VOXNOTE_CONFIG` is set) from `config.py:load_template_text`, which reads `config.example.yaml` **verbatim** — that template is the single source of truth for defaults. The canonical copy is the packaged asset `src/voxnote/assets/config.example.yaml` (the repo-root `config.example.yaml` is a symlink to it, so it ships in the wheel); a repo-local template is preferred when present for dev. **Adding a config key requires touching three places: the Pydantic model in `models.py`, the `config.example.yaml` template, and `README.md` if user-facing.** Pydantic field defaults exist as a safety net but the template is what users actually get.
 
 ### Two non-obvious mechanisms
 
@@ -61,13 +61,13 @@ State lives in append-only JSONL indexes under `.voxnote/` (writes are upserts: 
 
 ### Speaker diarization (optional, off by default)
 
-When `diarization.enabled` (or `process --diarize`), `process` asks mlx-whisper for JSON with word timestamps, runs `diarize.py` on the **same** file it transcribed, and `speaker_merge.py` assigns each word to the diarization turn it overlaps most, merging runs into `Speaker N:` blocks. One speaker (or disabled) means the plain transcript is used unchanged, so nothing about a single-speaker note differs from before the feature. Models live in `.voxnote/diarization/`, downloaded once from k2-fsa GitHub releases. Adding a second backend means editing `diarize.py` only — `workflow.py` never sees the engine.
+When `diarization.enabled` (or `process --diarize`), `process` asks mlx-whisper for JSON with word timestamps, runs `diarize.py` on the **same** file it transcribed, and `speaker_merge.py` assigns each word to the diarization turn it overlaps most, merging runs into `Speaker N:` blocks. One speaker (or disabled) means the plain transcript is used unchanged, so nothing about a single-speaker note differs from before the feature. Models live in `diarization/` under the resolved state dir (see Config flow), downloaded once from k2-fsa GitHub releases. Adding a second backend means editing `diarize.py` only — `workflow.py` never sees the engine.
 
 ## Conventions & invariants
 
 - **Privacy (cross-cutting, enforced by convention).** Transcription and note text are sensitive. Do **not** log or print full text by default — emit paths, counts, lengths, hashes instead. Full LLM exchanges go only to `.voxnote/llm_debug.jsonl` and only when `llm.debug: true`.
 - **Local-only.** Do not add any cloud LLM/transcription integration. Ollama + mlx-whisper are the backends.
-- **File-write boundary.** Only write under `input/`, `output/`, `archive/`, `.voxnote/` (plus test `tmp_path`). Never modify originals except the explicit archive step; never delete/overwrite without an explicit `--force`.
+- **File-write boundary.** Only write under the configured `input/`, `output/`, `archive/`, the resolved state dir (`.voxnote/` or `~/Library/Application Support/voxnote/`), and `~/.config/voxnote/` (config via `init`) — plus test `tmp_path`. Never modify originals except the explicit archive step; never delete/overwrite without an explicit `--force`.
 - **CLI UX.** Output is English and terse. Every error message states the reason **and** the next action (a command/flag to run). Don't surface tracebacks to users by default.
 - **Tests** must run without Ollama/ffmpeg/torch/mlx-whisper — mock those boundaries. Use `tmp_path` for all I/O, never the repo's real `config.yaml`. Freeze time with `freezegun` (`@freeze_time`) rather than calling `datetime.now()` in assertions. `tests/conftest.py` puts `src/` on `sys.path`. `TESTS_NEEDED.md` tracks the coverage checklist.
 - **Comments** in English, only for non-obvious logic; no change-history narration. TODO format: `# TODO: Action: ...`.

@@ -74,13 +74,15 @@ def _permission_denied_message(source_dir: Path) -> str:
     )
     if protected_hint:
         base += (
-            " This folder is protected by macOS. Grant Full Disk Access to the "
-            "terminal you run voxnote from: System Settings > Privacy & Security "
-            "> Full Disk Access. Then fully quit and reopen the terminal."
+            " This folder is protected by macOS. Grant Full Disk Access to the terminal "
+            "you use for `voxnote collect` (a dedicated terminal is recommended, so your "
+            "everyday terminal stays without full access): System Settings > Privacy & "
+            "Security > Full Disk Access. Then fully quit and reopen that terminal."
         )
     else:
         base += (
-            " On macOS, grant the terminal Full Disk Access in System Settings > Privacy & Security > Full Disk Access."
+            " On macOS, grant Full Disk Access to the terminal you use for `voxnote collect` "
+            "(System Settings > Privacy & Security > Full Disk Access), then quit & reopen it."
         )
     return base
 
@@ -735,7 +737,10 @@ class Workflow:
                 except Exception as exc:
                     error_msg = f"Error copying {source_path.name}: {exc}"
                     if "permission" in str(exc).lower():
-                        error_msg += " On macOS, grant Full Disk Access in System Settings > Privacy & Security."
+                        error_msg += (
+                            " On macOS, grant Full Disk Access to the terminal you use for "
+                            "`voxnote collect` (System Settings > Privacy & Security)."
+                        )
                     elif "not found" in str(exc).lower() or "no such file" in str(exc).lower():
                         error_msg += f" Check that the source path exists: {source_path}"
                     yield WorkflowEvent("error", error_msg, file=source_path)
@@ -745,8 +750,8 @@ class Workflow:
                     yield WorkflowEvent(
                         "warning",
                         f"Skipped {path_str}: {reason}. "
-                        "On macOS, grant Full Disk Access to your terminal "
-                        "(System Settings > Privacy & Security > Full Disk Access).",
+                        "On macOS, grant Full Disk Access to the terminal you use for "
+                        "`voxnote collect` (System Settings > Privacy & Security > Full Disk Access).",
                     )
                 else:
                     yield WorkflowEvent("warning", f"Skipped {path_str}: {reason}")

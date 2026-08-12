@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 from .audio_metadata import AudioMetadata
-from .config import DEFAULT_CONFIG_PATH
+from .config import resolve_config_path, resolve_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class OriginalMetadataEntry:
 
 
 def _state_dir(base: Optional[Path] = None) -> Path:
-    return (base or (DEFAULT_CONFIG_PATH.parent / ".voxnote")).expanduser().resolve()
+    return (base or resolve_state_dir(resolve_config_path())).expanduser().resolve()
 
 
 def processed_index_path(state_dir: Optional[Path] = None) -> Path:

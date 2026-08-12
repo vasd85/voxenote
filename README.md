@@ -111,6 +111,16 @@ source .venv/bin/activate
 
 (Path may vary depending on your `uv`/IDE settings.)
 
+### 4. (Optional) Install globally to run from any directory
+
+`uv sync` is enough for development from the project root. To run `voxnote` from **any** directory, install it as a uv tool:
+
+```bash
+uv tool install .
+```
+
+This puts a `voxnote` command on your `PATH` (usually `~/.local/bin/voxnote`). After that, use `voxnote <command>` anywhere instead of `uv run voxnote <command>`. Re-run `uv tool install . --force` to update after pulling changes.
+
 ---
 
 ## Models setup
@@ -170,7 +180,8 @@ The Silero VAD model is downloaded automatically on first use via `torch.hub` an
 
 Only needed if you turn on `diarization.enabled`. Two models (~35 MB total) are downloaded once from the
 [k2-fsa/sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) GitHub releases — no Hugging Face account or token — and cached in
-`.voxnote/diarization/`:
+`diarization/` inside the state dir (`.voxnote/diarization/` for a project-local config, otherwise
+`~/Library/Application Support/voxnote/diarization/` — see "Where data lives" under Configuration):
 
 - segmentation: `sherpa-onnx-pyannote-segmentation-3-0/model.onnx` (MIT),
 - speaker embedding: `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`.
@@ -179,7 +190,8 @@ After that first download everything runs offline. If the download fails, the er
 you can also fetch them by hand from the
 [segmentation](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) and
 [embedding](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) release pages and drop them
-into `.voxnote/diarization/`. `uv run voxnote doctor` reports whether both files are present and readable.
+into that directory (`uv run voxnote doctor` prints the exact paths it expects, and reports whether both files are
+present and readable).
 
 ---
 
@@ -212,9 +224,9 @@ Template excerpt (`config.example.yaml`):
 
 ```yaml
 paths:
-  input: ./input
-  output: ./output
-  archive: ./archive
+  input: ~/Documents/voxnote/input
+  output: ~/Documents/voxnote/output
+  archive: ~/Documents/voxnote/archive
 
 pipeline:
   # Steps that `voxnote run` executes, in order. Set any to false to skip it.
@@ -256,9 +268,32 @@ diarization:
 
 See `config.example.yaml` for the full template (single source of truth).
 
-- `config.yaml` lives in the project root: `voxnote/config.yaml`.
-- `config.py` resolves it relative to the project root, so you normally do not need to pass any paths manually.
-- If you keep multiple configs, pass `--config path/to/config.yaml` to any command.
+**Where config lives (discovery order).** With no `--config` flag, voxnote looks for `config.yaml` in this order:
+
+1. `$VOXNOTE_CONFIG`, if set
+2. `~/.config/voxnote/config.yaml` (or `$XDG_CONFIG_HOME/voxnote/config.yaml`) — the global-install default; `voxnote init` creates it here
+3. `./config.yaml` in the current directory
+4. the repo root `voxnote/config.yaml` (development fallback)
+
+Relative `paths:` are resolved against the config file's own directory; absolute and `~` paths are used as-is. To pin a specific config, pass `--config /path/to/config.yaml` (or set `VOXNOTE_CONFIG`) on any command.
+
+**Where data lives.** With the global user config, pipeline state and caches live in `~/Library/Application Support/voxnote/`, and notes/audio default to `~/Documents/voxnote/{input,output,archive}` (edit `paths:` to change). When run from a project that already has a `.voxnote/` directory beside its config, that local state is kept (backward compatible).
+
+---
+
+## Full Disk Access (macOS Voice Memos)
+
+Voice Memos recordings live in a macOS-protected folder (`~/Library/Group Containers/group.com.apple.VoiceMemos.shared/Recordings` on recent macOS). Reading it requires **Full Disk Access (FDA)**.
+
+macOS grants FDA to the *terminal* that launches a command-line tool, not to the tool itself (the terminal is the "responsible process"). To avoid giving your everyday terminal full disk access, use a **dedicated terminal just for collecting**:
+
+1. Install a second terminal app (or create a separate Terminal/iTerm profile) used only for voxnote.
+2. System Settings → Privacy & Security → Full Disk Access → add that terminal → enable it → fully quit and reopen it.
+3. Run only `voxnote collect` from that terminal. Everything else (`prepare-vad`, `vad-trim`, `process`) reads `input/` and needs no special access, so run it from your normal terminal.
+
+Add the Voice Memos folder to `sources:` in your config, then verify access with `voxnote doctor` — it probes each source and reports `permission denied` when FDA is missing.
+
+Only `collect` needs FDA. Granting voxnote *itself* its own FDA (rather than a terminal) would require code-signing plus a LaunchAgent/app wrapper — intentionally out of scope for now.
 
 ---
 
@@ -299,7 +334,7 @@ dialogue. Notes also gain a `- **Speakers:** N` header field.
 | `min_duration_on` | Speech turns shorter than this (seconds) are dropped. |
 | `min_duration_off` | Silence shorter than this (seconds) does not split a turn. |
 | `num_threads` | ONNX threads. Diarization is CPU-only and runs far faster than real time. |
-| `segmentation_model` / `embedding_model` | Leave empty for the defaults. A bare file name for `embedding_model` (e.g. `nemo_en_titanet_small.onnx`) is downloaded from the k2-fsa embedding release; a path (absolute, or relative to `.voxnote/diarization/`) is used as-is and never downloaded. |
+| `segmentation_model` / `embedding_model` | Leave empty for the defaults. A bare file name for `embedding_model` (e.g. `nemo_en_titanet_small.onnx`) is downloaded from the k2-fsa embedding release; a path (absolute, or relative to the `diarization/` models dir) is used as-is and never downloaded. |
 
 `prompts.speaker_labels_hint` in `config.yaml` is the extra instruction appended to the system prompt for labeled
 transcripts only — edit it if you want the LLM to treat the dialogue differently. It repeats the prompt-injection guard,
@@ -447,9 +482,9 @@ uv run voxnote init --force
 
 This command will:
 
-- Write default `config.yaml` at the expected path.
-- Use `config.example.yaml` as the template (single source of truth).
-- Ensure `input/`, `output/`, `archive/` directories exist.
+- Write a default `config.yaml` at `~/.config/voxnote/config.yaml` (or at `--config`/`$VOXNOTE_CONFIG` if set).
+- Use the packaged `config.example.yaml` as the template (single source of truth), so it works even outside the repo.
+- Ensure the `input/`, `output/`, `archive/` directories from `paths:` exist.
 
 ### 2. Collect audio files from sources
 

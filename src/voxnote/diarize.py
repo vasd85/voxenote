@@ -25,7 +25,7 @@ from typing import Any, Callable, Optional, Tuple
 
 import requests
 
-from .config import DEFAULT_CONFIG_PATH
+from .config import resolve_config_path, resolve_state_dir
 from .models import AppConfig, DiarizationResult, SpeakerTurn
 
 DIARIZATION_SAMPLE_RATE = 16000
@@ -47,7 +47,7 @@ DEFAULT_EMBEDDING_FILENAME = "3dspeaker_speech_campplus_sv_zh_en_16k-common_adva
 
 
 def _state_dir(base: Optional[Path] = None) -> Path:
-    return (base or (DEFAULT_CONFIG_PATH.parent / ".voxnote")).expanduser().resolve()
+    return (base or resolve_state_dir(resolve_config_path())).expanduser().resolve()
 
 
 def diarization_models_dir(state_dir: Optional[Path] = None) -> Path:

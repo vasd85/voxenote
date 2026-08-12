@@ -12,7 +12,7 @@ from pathlib import Path
 
 import requests
 
-from .config import DEFAULT_CONFIG_PATH
+from .config import resolve_config_path, resolve_state_dir
 from .models import AppConfig, NoteAnalysis
 from .runtime import build_runtime
 
@@ -125,7 +125,7 @@ def _debug_log_llm(
         return
 
     try:
-        state_root = (state_dir or (DEFAULT_CONFIG_PATH.parent / ".voxnote")).expanduser().resolve()
+        state_root = (state_dir or resolve_state_dir(resolve_config_path())).expanduser().resolve()
         state_root.mkdir(parents=True, exist_ok=True)
         path = state_root / "llm_debug.jsonl"
 

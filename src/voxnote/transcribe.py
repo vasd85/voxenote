@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List
 
-from .config import DEFAULT_CONFIG_PATH, load_config
+from .config import load_config, resolve_config_path, resolve_state_dir
 from .models import AppConfig, TranscriptionResult, TranscriptSegment, TranscriptWord
 
 
@@ -201,7 +201,7 @@ def _debug_log_whisper(
         return
 
     try:
-        state_root = (state_dir or (DEFAULT_CONFIG_PATH.parent / ".voxnote")).expanduser().resolve()
+        state_root = (state_dir or resolve_state_dir(resolve_config_path())).expanduser().resolve()
         state_root.mkdir(parents=True, exist_ok=True)
         path = state_root / "whisper_debug.jsonl"
 

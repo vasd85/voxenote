@@ -11,13 +11,13 @@ from typing import Any, List, Optional, Tuple
 import torch
 
 from .cache_paths import build_trimmed_cache_path, find_prepared_cache_path
-from .config import DEFAULT_CONFIG_PATH
+from .config import resolve_config_path, resolve_state_dir
 from .models import AppConfig, VADConfig
 from .state import compute_file_hash
 
 
 def _state_dir(base: Path | None = None) -> Path:
-    return (base or (DEFAULT_CONFIG_PATH.parent / ".voxnote")).expanduser().resolve()
+    return (base or resolve_state_dir(resolve_config_path())).expanduser().resolve()
 
 
 def get_trimmed_cache_path(
