@@ -12,9 +12,11 @@ from voxnote.models import (
     LLMConfig,
     PathsConfig,
     PromptsConfig,
+    SpeakerTurn,
     TranscriptionConfig,
     TranscriptSegment,
 )
+from voxnote.speaker_merge import assign_speakers
 
 
 def _make_config(root: Path) -> AppConfig:
@@ -68,6 +70,34 @@ def test_parse_whisper_json_tolerates_missing_timings_and_junk() -> None:
     assert segments[0].words[0].start == 0.0
     # An end before the start is clamped rather than propagated.
     assert segments[1].end == segments[1].start == 5.0
+
+
+def test_parse_whisper_json_anchors_missing_middle_word_timings_to_previous_word() -> None:
+    payload = {
+        "segments": [
+            {
+                "start": 10.0,
+                "end": 20.0,
+                "text": " one two three",
+                "words": [
+                    {"word": " one", "start": 15.5, "end": 16.5},
+                    {"word": " two", "start": None, "end": None},
+                    {"word": " three", "start": 17.0, "end": 18.0},
+                ],
+            }
+        ]
+    }
+
+    segments = transcribe._parse_whisper_json(payload)
+
+    # The degraded word stays at the running position instead of jumping to the segment start.
+    degraded = segments[0].words[1]
+    assert degraded.start == degraded.end == 16.5
+
+    # All three words sit inside the second turn, so the block must not fragment.
+    turns = [SpeakerTurn(speaker=0, start=10.0, end=15.0), SpeakerTurn(speaker=1, start=15.0, end=20.0)]
+    blocks = assign_speakers(segments, turns)
+    assert [(block.speaker, block.text) for block in blocks] == [(1, "one two three")]
 
 
 def test_parse_whisper_json_without_segments_returns_empty() -> None:

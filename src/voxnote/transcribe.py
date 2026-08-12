@@ -143,15 +143,20 @@ def _parse_whisper_json(payload: dict) -> List[TranscriptSegment]:
         words: List[TranscriptWord] = []
         raw_words = raw_segment.get("words")
         if isinstance(raw_words, list):
+            # Missing/invalid word timings fall back to the previous word's end (segment
+            # start for the first word), not the segment start: a zero-length token at the
+            # segment's opening instant would be attributed to the wrong speaker turn.
+            cursor = start
             for raw_word in raw_words:
                 if not isinstance(raw_word, dict):
                     continue
                 word_text = str(raw_word.get("word") or "")
                 if not word_text.strip():
                     continue
-                word_start = _as_float(raw_word.get("start"), start)
+                word_start = _as_float(raw_word.get("start"), cursor)
                 word_end = max(_as_float(raw_word.get("end"), word_start), word_start)
                 words.append(TranscriptWord(text=word_text, start=word_start, end=word_end))
+                cursor = word_end
 
         segments.append(TranscriptSegment(text=text, start=start, end=end, words=words))
 
