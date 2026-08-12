@@ -26,6 +26,9 @@ class ProcessedAudioEntry:
     recorded_at_source: Optional[str] = None
     transcribed_file_hash: Optional[str] = None
     transcribed_path: Optional[str] = None
+    # Absent in entries written before diarization existed; readers treat that as "disabled".
+    diarization_fingerprint: Optional[str] = None
+    speaker_count: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,9 @@ class FailedTranscriptionEntry:
     audio_path: str
     text: str
     error: str
+    diarization_fingerprint: Optional[str] = None
+    speaker_count: Optional[int] = None
+    turn_count: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,7 @@ def failed_transcriptions_path(state_dir: Optional[Path] = None) -> Path:
 
 def collected_audio_index_path(state_dir: Optional[Path] = None) -> Path:
     return _state_dir(state_dir) / "collected_audio.jsonl"
+
 
 def original_metadata_index_path(state_dir: Optional[Path] = None) -> Path:
     return _state_dir(state_dir) / "original_metadata.jsonl"
@@ -223,12 +230,12 @@ def append_failed_transcription_entry(
         f.write(json.dumps(payload, ensure_ascii=False, default=_json_default) + "\n")
 
 
-def get_failed_transcription_text(
+def get_failed_transcription(
     audio_path: Path,
     path: Optional[Path] = None,
     state_dir: Optional[Path] = None,
-) -> Optional[str]:
-    """Return previously saved transcription text for given audio, if any."""
+) -> Optional[Dict[str, Any]]:
+    """Return the stored failed-transcription entry for given audio, if any."""
     index_path = path or failed_transcriptions_path(state_dir)
     if not index_path.exists():
         return None
@@ -252,8 +259,18 @@ def get_failed_transcription_text(
         except Exception:
             stored_norm = stored
         if stored_norm == target and isinstance(obj.get("text"), str):
-            return obj["text"]
+            return obj
     return None
+
+
+def get_failed_transcription_text(
+    audio_path: Path,
+    path: Optional[Path] = None,
+    state_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Return previously saved transcription text for given audio, if any."""
+    entry = get_failed_transcription(audio_path, path=path, state_dir=state_dir)
+    return entry.get("text") if entry else None
 
 
 def purge_failed_transcription(
@@ -454,4 +471,3 @@ def load_original_metadata(
         ffprobe=last.get("ffprobe") if isinstance(last.get("ffprobe"), dict) else None,
         stat=last.get("stat") if isinstance(last.get("stat"), dict) else {},
     )
-
