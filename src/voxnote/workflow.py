@@ -531,17 +531,30 @@ class Workflow:
 
         diarization_enabled = self.config.diarization.enabled
         audio_for_transcription = self._select_transcription_source(original_path, original_hash)
+        if not diarization_enabled:
+            return transcribe_file(
+                self.config,
+                audio_for_transcription,
+                state_dir=self.state_dir,
+                word_timestamps=False,
+            )
+
+        # Diarization runs first: it is far cheaper than transcription, so a broken
+        # setup fails before minutes of mlx-whisper work are spent and lost. Both
+        # steps use the same file, so they share one timeline.
+        try:
+            diarization = diarize_audio(self.config, audio_for_transcription, state_dir=self.state_dir)
+        except Exception as exc:
+            # Engine errors (e.g. raw onnxruntime text) may not mention diarization
+            # at all; re-wrap so the per-file error hint always fires.
+            raise RuntimeError(f"Diarization failed: {exc}") from exc
+
         transcription = transcribe_file(
             self.config,
             audio_for_transcription,
             state_dir=self.state_dir,
-            word_timestamps=diarization_enabled,
+            word_timestamps=True,
         )
-        if not diarization_enabled:
-            return transcription
-
-        # Same file as transcription, so both share one timeline.
-        diarization = diarize_audio(self.config, audio_for_transcription, state_dir=self.state_dir)
         blocks = assign_speakers(transcription.segments, diarization.turns)
         speaker_count = count_speakers(blocks)
         # A single speaker must look exactly like a run without diarization.

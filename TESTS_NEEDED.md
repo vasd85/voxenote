@@ -241,6 +241,7 @@
 | `process_files()` | Failed-analysis retry with labels | Reuses labeled text, no re-transcription | Mock transcribe/diarize/analyze | P0 | Done |
 | `process_files()` | Failed-analysis retry after settings change | Re-transcribes instead of reusing text | Mock transcribe/diarize/analyze | P1 | Done |
 | `process_files()` | Engine/model preflight fails | One error event, zero-count summary, no per-file work | Mock `probe_diarization_engine` | P0 | Done |
+| `process_files()` | `diarize_audio` raises mid-file | Actionable error (doctor / `--no-diarize`), transcription never runs | Mock diarize | P0 | Done |
 | `process_files()` | `diarize=False` override | Diarization skipped despite config | Mock transcribe/diarize | P1 | Done |
 
 ### `cli.py`

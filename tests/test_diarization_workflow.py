@@ -368,6 +368,32 @@ def test_broken_diarization_setup_fails_the_step_once(
 
 
 @freeze_time("2024-01-01 12:00:00")
+def test_mid_file_diarization_failure_is_actionable_and_costs_no_transcription(
+    tmp_path: Path, boundaries: _Recorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workflow = _make_workflow(tmp_path, enabled=True)
+    _add_audio(workflow)
+
+    def failing_diarize(config, audio_path, *, state_dir=None, progress_callback=None):
+        # Deliberately no "sherpa"/"diarization" wording, like a raw engine error.
+        raise RuntimeError("onnxruntime tensor shape mismatch")
+
+    monkeypatch.setattr(workflow_module, "diarize_audio", failing_diarize)
+
+    events = list(workflow.process_files())
+
+    errors = [event for event in events if event.type == "error"]
+    assert len(errors) == 1
+    assert "onnxruntime tensor shape mismatch" in errors[0].message
+    assert "voxnote doctor" in errors[0].message
+    assert "--no-diarize" in errors[0].message
+    # Diarization failed before the expensive transcription even started.
+    assert boundaries.transcribe_calls == []
+    summary = next(event for event in events if event.type == "summary")
+    assert summary.data == {"processed": 0, "skipped": 0, "failed": 1}
+
+
+@freeze_time("2024-01-01 12:00:00")
 def test_cli_override_can_force_diarization_off(
     tmp_path: Path, boundaries: _Recorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
